@@ -25,6 +25,8 @@ P2PNet に進む。
 ```sh
 sh build/gcc.sh pure/crowd.cpp -o crowd.exe
 ./crowd.exe init-csrnet --out models/csrnet.onnx --imgsz 384       # グラフを C++ が書く
+./crowd.exe labels --mat GT_IMG_1.mat --img IMG_1.jpg              # 密度ラベル（合計＝人数）
+./crowd.exe labels --mat GT_IMG_1.mat --img IMG_1.jpg --fidt       # FIDT マップ（極大＝頭の位置）
 ./crowd.exe infer --img <画像> --model models/csrnet.onnx          # 自作ランタイムで推論
 sh build/gcc.sh pure/gradcheck.cpp -o gradcheck.exe && ./gradcheck.exe
 ```
@@ -64,7 +66,8 @@ sh build/gcc.sh pure/gradcheck.cpp -o gradcheck.exe && ./gradcheck.exe
 | グラフ生成 | 予定 | `crowd init-csrnet` ✅ | 同じ ONNX が出る（重み以外バイト一致） |
 | `.pt` からの転移 | `torch.load` | `pure/ptio.hpp` ✅ | 前段の活性が torchvision と 7.9e-07 |
 | 推論 | 予定 | `crowd infer` ✅ | 同一画像で count が一致（対 onnxruntime で実測 4e-04 相対） |
-| 密度ラベル生成 | 予定 | 予定 | 同じ点群から同じマップ（バイト一致） |
+| `.mat` 読み込み | `scipy.io.loadmat` | `pure/matio.hpp`（zlib 圧縮つき） ✅ | 同じ座標が出る |
+| ラベル生成（密度・FIDT） | `tools/density.py` ✅ | `pure/density.hpp` ✅ | 相対差 5e-06 以下、FIDT のピーク数は完全一致（`tools/parity/labels.py`） |
 | 学習 | 予定 | 予定 | 同じ seed・同じ batch で step1 の loss が一致 |
 | 評価（MAE / F1） | 予定 | 予定 | 同じデータで同じ数値 |
 
