@@ -1,0 +1,14 @@
+data/
+scratch/
+# 生成した ONNX は入れない。CSRNet は 16.3M パラメータ = 1 個 62MB で、
+# `crowd init-csrnet` の 1 コマンドで作り直せる。学習済みの軽量版だけ後で例外にする。
+models/*.onnx
+*.exe
+*.obj
+*.o
+__pycache__/
+*.pyc
+.venv/
+# 事前学習重みとデータセットは各自で用意する（README のライセンス節）
+*.pth
+*.pt
