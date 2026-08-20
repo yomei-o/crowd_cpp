@@ -21,7 +21,35 @@
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
+#include <direct.h>
+#else
+#include <sys/stat.h>
 #endif
+
+// mkdir -p. Without this, writing models/x.onnx into a fresh clone silently does nothing: the
+// directory is not in git (gitignore keeps generated ONNX out, and git stores no empty directories),
+// so fopen fails and the only symptom is a missing file several steps later. The sibling repo has the
+// same rule written down.
+static void make_dir(const std::string& d) {
+  std::string acc;
+  for (size_t i = 0; i <= d.size(); ++i) {
+    if (i == d.size() || d[i] == '/' || d[i] == (char)0x5c) {
+      if (!acc.empty() && acc != "." && acc != "..") {
+#ifdef _WIN32
+        _mkdir(acc.c_str());
+#else
+        mkdir(acc.c_str(), 0755);
+#endif
+      }
+    }
+    if (i < d.size()) acc += d[i];
+  }
+}
+
+static void make_parent(const std::string& path) {
+  const size_t sl = path.find_last_of("/" + std::string(1, (char)0x5c));
+  if (sl != std::string::npos) make_dir(path.substr(0, sl));
+}
 
 static std::string arg_of(int argc, char** argv, const std::string& key, const std::string& def) {
   for (int i = 2; i + 1 < argc; ++i) if (key == argv[i]) return argv[i + 1];
@@ -55,6 +83,7 @@ static int cmd_init_csrnet(int argc, char** argv) {
   int taken = 0, made = 0;
   std::vector<std::string> missed;
   onx::Graph g = csr::build(sp, from_pt.empty() ? nullptr : &src, &taken, &made, &missed);
+  make_parent(out);
   onx::save_onnx(g, out);
   size_t params = 0;
   for (const onx::Tensor64& t : g.init_f) params += t.data.size();
@@ -122,6 +151,7 @@ static int cmd_labels(int argc, char** argv) {
     printf("  peaks above 0.5 (radius 1): %zu\n", pk.size());
   }
   if (!out.empty()) {
+    make_parent(out);
     FILE* f = fopen(out.c_str(), "wb");
     if (!f) { printf("cannot write %s\n", out.c_str()); return 1; }
     int32_t hdr[2] = {m.w, m.h};
