@@ -3,6 +3,7 @@
 //
 //   crowd init-csrnet --out models/csrnet.onnx [--from-pt vgg16.pth] [--imgsz 384] [--width 1.0]
 //   crowd labels      --mat <GT.mat> --img <image> [--fidt | --adaptive] [--out map.bin]
+//   crowd train       --data <ShanghaiTech/part_B> --init <onnx> [--steps N] [--export <onnx>]
 //   crowd infer       --img <file> --model <onnx> [--out heat.png]
 //
 // build: sh build/gcc.sh pure/crowd.cpp -o crowd.exe   |   sh build/cc.sh pure/crowd.cpp -o crowd.exe
@@ -13,6 +14,9 @@
 #include "make_csrnet.hpp"
 #include "matio.hpp"
 #include "density.hpp"
+#include "train_csrnet.hpp"
+#include "optim.hpp"
+#include "trainrt.hpp"
 #include "onnx_run.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -100,6 +104,109 @@ static int cmd_init_csrnet(int argc, char** argv) {
       if (shown++ < 6) printf("    fresh: %s\n", m.c_str());
     if (missed.size() > 6) printf("    ... and %zu more\n", missed.size() - 6);
   }
+  return 0;
+}
+
+// crowd train — fine-tune a CSRNet ONNX in place. Mirrors tools/train_csrnet.py: random crops, summed
+// MSE averaged over the batch, whole-image MAE for evaluation.
+static int cmd_train(int argc, char** argv) {
+  const std::string data = arg_of(argc, argv, "--data", "");
+  const std::string init = arg_of(argc, argv, "--init", "models/csrnet.onnx");
+  const std::string out = arg_of(argc, argv, "--export", "");
+  const int steps = std::atoi(arg_of(argc, argv, "--steps", "100").c_str());
+  const int batch = std::atoi(arg_of(argc, argv, "--batch", "4").c_str());
+  const int crop = std::atoi(arg_of(argc, argv, "--crop", "384").c_str());
+  const float lr = (float)atof(arg_of(argc, argv, "--lr", "1e-5").c_str());
+  const int eval_every = std::atoi(arg_of(argc, argv, "--eval-every", "0").c_str());
+  const int eval_limit = std::atoi(arg_of(argc, argv, "--eval-limit", "0").c_str());
+  const uint64_t seed = strtoull(arg_of(argc, argv, "--seed", "1234").c_str(), nullptr, 10);
+  const bool dump_loss = has_flag(argc, argv, "--dump-loss");
+  const std::string fixture = arg_of(argc, argv, "--dump-fixture", "");
+  den::Cfg cfg;
+  cfg.down = std::atoi(arg_of(argc, argv, "--down", "8").c_str());
+  cfg.sigma = (float)atof(arg_of(argc, argv, "--sigma", "15").c_str());
+  cfg.adaptive = has_flag(argc, argv, "--adaptive");
+  if (data.empty()) {
+    printf("usage: crowd train --data <ShanghaiTech/part_B> [--init onnx] [--steps N] [--batch N]\n"
+           "                   [--crop 384] [--lr 1e-5] [--adaptive] [--eval-every N] [--export onnx]\n");
+    return 1;
+  }
+
+  std::vector<csrt::Item> train = csrt::read_split(data, "train", cfg, !dump_loss);
+  if (train.empty()) { printf("no training images under %s\n", data.c_str()); return 1; }
+  std::vector<csrt::Item> test;
+  if (eval_every > 0) test = csrt::read_split(data, "test", cfg, !dump_loss);
+
+  onx::Graph g = onx::load_onnx(init);
+  onx::Trainable t = onx::make_trainable(g);
+  if (!dump_loss) {
+    printf("%s: %zu trainable tensors, %zu parameters\n", init.c_str(), t.params.size(),
+           onx::param_count(t));
+    printf("data: %zu train / %zu test images, crop %d, batch %d, lr %g, %s sigma\n",
+           train.size(), test.size(), crop, batch, lr, cfg.adaptive ? "adaptive" : "fixed");
+  }
+  Adam opt(t.params, lr, 0.9f, 0.999f, 1e-8f, 0.f, false);
+  Rng rng(seed);
+  double run = -1;
+  double best = 1e9;
+  int best_step = 0;
+  for (int step = 1; step <= steps; ++step) {
+    csrt::Batch b = csrt::make_batch(train, crop, batch, rng, cfg);
+    std::map<std::string, Tensor> vals = onx::run_onnx(t.g, b.x, {}, &t.init, false);
+    Tensor pred = vals.at(t.g.outputs[0].name);
+    Tensor loss = csrt::mse_sum(pred, b.y, batch);
+    opt.zero_grad();
+    backward(loss);
+    opt.step();
+    const double lv = loss->data[0];
+    run = run < 0 ? lv : 0.9 * run + 0.1 * lv;
+    free_graph(loss);
+    if (!fixture.empty() && step == 1) {
+      // Step 1's exact batch, the loss and every parameter gradient — what tools/parity/train.py
+      // replays through the PyTorch model. Comparing two trainers on their *own* batches would only
+      // ever measure the samplers; this measures the loss and the gradients.
+      make_parent(fixture);
+      FILE* f = fopen(fixture.c_str(), "wb");
+      if (f) {
+        fwrite("CSRFIX01", 1, 8, f);
+        int32_t hdr[5] = {batch, 3, crop, b.mh, (int32_t)t.params.size()};
+        fwrite(hdr, 4, 5, f);
+        fwrite(b.x->data.data(), 4, b.x->data.size(), f);
+        fwrite(b.y.data(), 4, b.y.size(), f);
+        float lvf = (float)lv;
+        fwrite(&lvf, 4, 1, f);
+        for (size_t i = 0; i < t.params.size(); ++i) {
+          const std::string& nm = t.param_names[i];
+          int32_t nl = (int32_t)nm.size();
+          fwrite(&nl, 4, 1, f);
+          fwrite(nm.data(), 1, nm.size(), f);
+          int32_t ne = (int32_t)t.params[i]->numel();
+          fwrite(&ne, 4, 1, f);
+          fwrite(t.params[i]->grad.data(), 4, (size_t)ne, f);
+        }
+        fclose(f);
+        if (!dump_loss) printf("wrote %s (batch, loss and %zu parameter gradients of step 1)\n",
+                               fixture.c_str(), t.params.size());
+      }
+    }
+    if (dump_loss) printf("step %d loss %.6f\n", step, lv);
+    else if (step % 5 == 0 || step == 1) printf("  step %5d/%d  loss %10.3f\n", step, steps, run);
+    fflush(stdout);
+    if (eval_every > 0 && step % eval_every == 0 && !test.empty()) {
+      csrt::Eval e = csrt::evaluate(t, test, cfg, eval_limit);
+      printf("  eval @%d: test MAE %.2f  RMSE %.2f (%d images)%s\n", step, e.mae, e.rmse, e.n,
+             e.mae < best ? "  <- best" : "");
+      if (e.mae < best) { best = e.mae; best_step = step; }
+      fflush(stdout);
+    }
+  }
+  if (!out.empty()) {
+    onx::write_back(t);
+    make_parent(out);
+    onx::save_onnx(t.g, out);
+    printf("wrote %s\n", out.c_str());
+  }
+  if (best_step) printf("best test MAE %.2f at step %d\n", best, best_step);
   return 0;
 }
 
@@ -211,12 +318,13 @@ int main(int argc, char** argv) {
   SetConsoleOutputCP(CP_UTF8);
 #endif
   if (argc < 2) {
-    printf("usage: crowd <init-csrnet|labels|infer> ...\n");
+    printf("usage: crowd <init-csrnet|labels|train|infer> ...\n");
     return 1;
   }
   const std::string cmd = argv[1];
   if (cmd == "init-csrnet") return cmd_init_csrnet(argc, argv);
   if (cmd == "labels") return cmd_labels(argc, argv);
+  if (cmd == "train") return cmd_train(argc, argv);
   if (cmd == "infer") return cmd_infer(argc, argv);
   printf("crowd: '%s' is not implemented yet\n", cmd.c_str());
   return 1;

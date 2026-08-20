@@ -17,6 +17,8 @@
 | 自作ランタイム ⇔ onnxruntime（**dilated conv 6 本を通した後**） | count -2028.06 / -2028.0618、max -0.8683 / -0.868379 |
 | `.mat` リーダ（圧縮つき） | 1546 点の zlib 圧縮ファイルから座標を復元、scipy と一致 |
 | ラベル生成 C++ ⇔ Python | 3 種すべて相対差 **5e-06 以下**、密度の合計は点数と 2e-06 で一致、FIDT のピーク 907/907 |
+| 学習 C++ ⇔ Python（同じバッチ） | loss **完全一致** 3.453135、勾配 34 テンソルの最悪 **2.57e-05** |
+| 可変サイズ入力 | 自作ランタイムは元から任意サイズ（384 宣言のグラフを 512 で実行）。ONNX を動的宣言にして ORT でも 768x1024 / 664x1000 が通る |
 
 ## マイルストーン
 
@@ -36,9 +38,17 @@
         （依存は増えない）。1546 点の圧縮ファイル（23KB）を読んで座標が一致。
       - `pure/density.hpp` / `tools/density.py`: 密度（固定σ / 適応σ）と FIDT の 3 種。
         パリティ PASS（相対差 5e-06 以下、FIDT のピーク数 907/907 一致）。
-      - 残り: ShanghaiTech 本体の取得（Kaggle セッションが切れたので経路を用意する）。
-- [ ] **M5 学習（両言語）** — MSE で密度回帰。Python は torch、C++ は ONNX グラフ直接学習
-      （姉妹リポと同じ方式）。パリティは step1 の loss。
+      - ShanghaiTech は Kaggle の `tthien/shanghaitech`（349MB）から取得。`kaggle` CLI の認証が
+        Kaggle ノートブック内では通っているので、`kaggle datasets download` が動く（5.7 秒）。
+        Part A 300/182、Part B 400/316 の正規の split。本物の GT で C++ リーダを確認済み
+        （GT_IMG_1 が 1546 点、密度の合計が点数と 3.4e-06 で一致）。
+- [~] **M5 学習（両言語）** — 実装とパリティは完了、本番学習が回っている最中。
+      - Python: `tools/csrnet.py`（ONNX の初期化子を**名前で**読み書きする torch 実装）
+        ＋ `tools/train_csrnet.py`（ランダムクロップ学習、丸ごと 1 枚での MAE 評価）
+      - C++: `pure/train_csrnet.hpp` ＋ `crowd train` — ONNX グラフをそのまま学習する方式
+      - パリティ **PASS**: 同じバッチ（`--dump-fixture` で C++ が出した crop と目標マップ）で
+        **loss が完全一致**（3.453135）、勾配 34 テンソルすべて最悪 **2.57e-05**（`tools/parity/train.py`）
+      - forward は三者一致: 自作ランタイム 338.27 / onnxruntime 338.2703 / torch 338.2703
 - [ ] **M6 評価** — 数え上げ MAE/MSE。ShanghaiTech A の CSRNet 論文値は MAE 68.2、B は 10.6。
 - [ ] **M7 FIDTM** — ラベル生成（焦点逆距離変換）と後処理（局所最大）を差し替え、位置の F1 を測る。
 - [ ] **M8 軽量版** — `--width` で細くしたものを学習し、WASM デモに載せる。
