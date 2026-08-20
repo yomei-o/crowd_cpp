@@ -28,6 +28,7 @@ namespace csrt {
 
 struct Item {
   std::string img, gt;
+  std::vector<std::pair<float, float>> pts;   // the annotation, kept for localisation scoring
   int w = 0, h = 0;
   std::vector<unsigned char> px;      // RGB, kept decoded: ShanghaiTech is small and this makes the
   den::Map target;                    // step time a function of the network alone
@@ -73,6 +74,7 @@ inline std::vector<Item> read_split(const std::string& part_dir, const std::stri
     std::string why;
     const std::vector<std::pair<float, float>> pts = mat::load_points(gp, &why);
     it.count = (int)pts.size();
+    it.pts = pts;
     it.target = den::make(pts, w, h, cfg);
     out.push_back(std::move(it));
     if (verbose && out.size() % 100 == 0) printf("  prepared %zu\n", out.size());
@@ -198,6 +200,48 @@ inline Eval evaluate(onx::Trainable& t, const std::vector<Item>& items, const de
   e.n = (int)n;
   e.mae = n ? sa / n : 0;
   e.rmse = n ? std::sqrt(ss / n) : 0;
+  return e;
+}
+
+// Localisation: the peaks of the predicted FIDT map against the annotated points, as precision /
+// recall / F1 at a distance threshold in *image* pixels. This is the number FIDTM exists for — a
+// density model's count MAE says nothing about whether the positions are right.
+struct LocEval { double precision = 0, recall = 0, f1 = 0; int tp = 0, fp = 0, fn = 0, n = 0; };
+
+inline LocEval evaluate_loc(onx::Trainable& t, const std::vector<Item>& items, int out_down,
+                            float thr = 8.f, float peak_thr = 0.5f, int limit = 0) {
+  LocEval e;
+  const size_t n = limit > 0 ? std::min((size_t)limit, items.size()) : items.size();
+  for (size_t i = 0; i < n; ++i) {
+    const Item& it = items[i];
+    const int w = it.w - it.w % out_down, h = it.h - it.h % out_down;
+    Tensor x = make_tensor({1, 3, h, w}, false);
+    const float mean[3] = {0.485f, 0.456f, 0.406f}, sd[3] = {0.229f, 0.224f, 0.225f};
+    for (int c = 0; c < 3; ++c)
+      for (int y = 0; y < h; ++y)
+        for (int xx = 0; xx < w; ++xx) {
+          const float v = it.px[((size_t)y * it.w + xx) * 3 + c] / 255.f;
+          x->data[((size_t)c * h + y) * w + xx] = (v - mean[c]) / sd[c];
+        }
+    std::map<std::string, Tensor> vals = onx::forward(t, x);
+    const Tensor& p = vals.at(t.g.outputs[0].name);
+    den::Map m;
+    m.h = (int)p->shape[2];
+    m.w = (int)p->shape[3];
+    m.v.assign(p->data.begin(), p->data.begin() + (size_t)m.w * m.h);
+    std::vector<std::pair<float, float>> pk = den::peaks(m, peak_thr, 1);
+    const float scale = (float)w / (float)std::max(1, m.w);     // map pixels -> image pixels
+    for (auto& q : pk) { q.first *= scale; q.second *= scale; }
+    const den::Loc r = den::match_points(pk, it.pts, thr);
+    e.tp += r.tp;
+    e.fp += r.fp;
+    e.fn += r.fn;
+    free_graph(p);
+  }
+  e.n = (int)n;
+  e.precision = (e.tp + e.fp) ? (double)e.tp / (e.tp + e.fp) : 0;
+  e.recall = (e.tp + e.fn) ? (double)e.tp / (e.tp + e.fn) : 0;
+  e.f1 = (e.precision + e.recall) > 0 ? 2 * e.precision * e.recall / (e.precision + e.recall) : 0;
   return e;
 }
 

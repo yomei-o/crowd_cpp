@@ -131,9 +131,12 @@ static int cmd_train(int argc, char** argv) {
   cfg.down = std::atoi(arg_of(argc, argv, "--down", "8").c_str());
   cfg.sigma = (float)atof(arg_of(argc, argv, "--sigma", "15").c_str());
   cfg.adaptive = has_flag(argc, argv, "--adaptive");
+  cfg.fidt = has_flag(argc, argv, "--fidt");
+  const float loc_thr = (float)atof(arg_of(argc, argv, "--loc-thr", "8").c_str());
   if (data.empty()) {
     printf("usage: crowd train --data <ShanghaiTech/part_B> [--init onnx] [--steps N] [--batch N]\n"
-           "                   [--crop 384] [--lr 1e-5] [--adaptive] [--eval-every N] [--export onnx]\n");
+           "                   [--crop 0] [--lr 1e-5] [--optim sgd] [--adaptive | --fidt]\n"
+           "                   [--down 8] [--loc-thr 8] [--eval-every N] [--export onnx]\n");
     return 1;
   }
 
@@ -204,7 +207,14 @@ static int cmd_train(int argc, char** argv) {
     if (dump_loss) printf("step %d loss %.6f\n", step, lv);
     else if (step % 5 == 0 || step == 1) printf("  step %5d/%d  loss %10.3f\n", step, steps, run);
     fflush(stdout);
-    if (eval_every > 0 && step % eval_every == 0 && !test.empty()) {
+    if (eval_every > 0 && step % eval_every == 0 && !test.empty() && cfg.fidt) {
+      // FIDT: the metric is where the peaks are, not what the map sums to
+      csrt::LocEval e = csrt::evaluate_loc(t, test, cfg.down, loc_thr, 0.5f, eval_limit);
+      printf("  eval @%d: F1 %.4f  (precision %.4f  recall %.4f, %d images)%s\n", step, e.f1,
+             e.precision, e.recall, e.n, e.f1 > -best ? "  <- best" : "");
+      if (e.f1 > -best) { best = -e.f1; best_step = step; }
+      fflush(stdout);
+    } else if (eval_every > 0 && step % eval_every == 0 && !test.empty()) {
       csrt::Eval e = csrt::evaluate(t, test, cfg, eval_limit);
       printf("  eval @%d: test MAE %.2f  RMSE %.2f (%d images)%s\n", step, e.mae, e.rmse, e.n,
              e.mae < best ? "  <- best" : "");
@@ -218,7 +228,10 @@ static int cmd_train(int argc, char** argv) {
     onx::save_onnx(t.g, out);
     printf("wrote %s\n", out.c_str());
   }
-  if (best_step) printf("best test MAE %.2f at step %d\n", best, best_step);
+  if (best_step) {
+    if (cfg.fidt) printf("best F1 %.4f at step %d\n", -best, best_step);
+    else printf("best test MAE %.2f at step %d\n", best, best_step);
+  }
   return 0;
 }
 

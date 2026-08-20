@@ -88,7 +88,7 @@ Python 側は `tools/csrnet.py`（ONNX を名前で読み書きする torch 実�
 | `.mat` 読み込み | `scipy.io.loadmat` | `pure/matio.hpp`（zlib 対応） ✅ | 同じ座標 |
 | ラベル生成（密度・FIDT） | `tools/density.py` ✅ | `pure/density.hpp` ✅ | 相対 5e-06 以下、ピーク数は完全一致 |
 | 学習 | `tools/train_csrnet.py` ✅ | `crowd train` ✅ | 同じバッチで loss 完全一致、勾配 2.57e-05 |
-| 評価（MAE / F1） | ✅ | MAE ✅ / F1 は配線待ち | 同じデータで同じ数値 |
+| 評価（MAE / F1） | ✅ | ✅（`--fidt` で F1 に切替） | 同じデータで同じ数値 |
 | 推論 | `csrnet.py` + ORT ✅ | `crowd infer` ✅ | forward 三者一致 |
 
 テストは `tools/parity/`（`labels.py`, `train.py`, `vgg_front.py`）と `pure/gradcheck.cpp`。
