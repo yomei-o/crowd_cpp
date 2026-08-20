@@ -37,6 +37,7 @@ static int cmd_init_csrnet(int argc, char** argv) {
   sp.imgsz = std::atoi(arg_of(argc, argv, "--imgsz", "384").c_str());
   sp.width = (float)atof(arg_of(argc, argv, "--width", "1.0").c_str());
   sp.seed = strtoull(arg_of(argc, argv, "--seed", "1234").c_str(), nullptr, 10);
+  sp.dynamic = !has_flag(argc, argv, "--static");
   const std::string out = arg_of(argc, argv, "--out", "");
   const std::string from_pt = arg_of(argc, argv, "--from-pt", "");
   if (out.empty()) {
@@ -59,7 +60,10 @@ static int cmd_init_csrnet(int argc, char** argv) {
   for (const onx::Tensor64& t : g.init_f) params += t.data.size();
   printf("wrote %s: CSRNet imgsz=%d width=%.2f, %zu nodes, %zu tensors, %zu parameters\n",
          out.c_str(), sp.imgsz, sp.width, g.nodes.size(), g.init_f.size(), params);
-  printf("  density map is %dx%d (input/8); its sum is the count\n", sp.imgsz / 8, sp.imgsz / 8);
+  if (sp.dynamic)
+    printf("  input is declared dynamic (any HxW); the density map is input/8 and its sum is the count\n");
+  else
+    printf("  density map is %dx%d (input/8); its sum is the count\n", sp.imgsz / 8, sp.imgsz / 8);
   if (!from_pt.empty()) {
     printf("  %d tensors taken from the checkpoint, %d initialised here\n", taken, made);
     size_t shown = 0;
@@ -142,6 +146,14 @@ static int cmd_infer(int argc, char** argv) {
   onx::Graph g = onx::load_onnx(model);
   int64_t iw = g.inputs.empty() || g.inputs[0].dims.size() < 4 ? 384 : g.inputs[0].dims[3];
   int64_t ih = g.inputs.empty() || g.inputs[0].dims.size() < 4 ? 384 : g.inputs[0].dims[2];
+  // CSRNet is convolutional throughout, so the *declared* input size is only metadata; the runtime
+  // derives every shape from the tensor it is handed. --imgsz proves that: the same file can be run at
+  // a size it was never written for, which is what lets one graph evaluate whole images of any size.
+  const int over = std::atoi(arg_of(argc, argv, "--imgsz", "0").c_str());
+  if (over > 0) { iw = over; ih = over; }
+  const int ow = std::atoi(arg_of(argc, argv, "--w", "0").c_str());
+  const int oh = std::atoi(arg_of(argc, argv, "--h", "0").c_str());
+  if (ow > 0 && oh > 0) { iw = ow; ih = oh; }
 
   // ImageNet normalisation, because the front end is VGG-16's and that is what it was trained with
   const float mean[3] = {0.485f, 0.456f, 0.406f}, sd[3] = {0.229f, 0.224f, 0.225f};

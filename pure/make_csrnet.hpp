@@ -32,7 +32,12 @@
 namespace csr {
 
 struct Spec {
-  int imgsz = 384;        // the graph is written for a fixed square input (ONNX with static shapes)
+  int imgsz = 384;        // the size the graph *declares*; with `dynamic` it is only a hint
+  bool dynamic = true;    // declare H and W as dynamic. CSRNet is convolutional throughout, so the
+                          // declared size is metadata: our own runtime derives shapes from the tensor
+                          // it is handed either way, but onnxruntime refuses a size the graph pins.
+                          // Whole-image evaluation needs this, since ShanghaiTech images differ
+                          // (1024x768, 1024x713, 1000x664 ...).
   bool bn = false;        // CSRNet has a batch-norm variant; the paper's headline numbers are without
   float width = 1.0f;     // 1.0 = the paper's channel counts; smaller makes the light variant
   uint64_t seed = 1234;
@@ -62,7 +67,8 @@ class Builder {
 
   onx::Graph build() {
     g_.opset = 13;
-    g_.inputs.push_back({"input", {1, 3, sp_.imgsz, sp_.imgsz}});
+    const int64_t dh = sp_.dynamic ? -1 : sp_.imgsz;
+    g_.inputs.push_back({"input", {1, 3, dh, dh}});
     std::string x = "input";
     int cin = 3;
     for (const FrontLayer& f : front_layers()) {
@@ -82,7 +88,7 @@ class Builder {
     // paper regresses it directly with MSE; clamping here would hide negative predictions instead of
     // letting the loss punish them)
     const std::string out = conv(x, "output_layer", cin, 1, 1, 1, 0, 1, "density");
-    g_.outputs.push_back({out, {1, 1, sp_.imgsz / 8, sp_.imgsz / 8}});
+    g_.outputs.push_back({out, {1, 1, sp_.dynamic ? -1 : sp_.imgsz / 8, sp_.dynamic ? -1 : sp_.imgsz / 8}});
     return g_;
   }
 
