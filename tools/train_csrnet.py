@@ -10,9 +10,13 @@ paper (Part A MAE 68.2, Part B 10.6) or nowhere near it:
     Part B, adaptive (beta=0.3, k=3) for Part A, exactly as the paper splits them.
   * the loss is MSE *summed* over the map, averaged over the batch. Summing matters: with `mean` the
     gradient scales with the crop area and the learning rate stops meaning anything across crop sizes.
-  * training is on random crops (default 384) with random horizontal flips; evaluation is on **whole
-    images**, one at a time, because that is what the reported MAE means and because the graph is
-    written with dynamic H/W precisely so this is possible.
+  * training is on **whole images** by default (`--crop 0`, batch forced to 1), because that is what
+    the paper does and because the mismatch is not cosmetic. Measured with 384 crops instead: the loss
+    fell fine (3.4 -> 1.2) while the whole-image MAE sat at 50-158 and swung wildly, and the diagnosis
+    was that the model had learned to emit a near-uniform positive level — for IMG_1 (23 heads) it
+    predicted 135.6, of which 0.0110 x 12288 cells = 135 was DC. Every 384 crop of Part B contains
+    heads, so a constant is a good local minimum on crops and a disaster on a whole image five times
+    the area. `--crop N` keeps the old behaviour for experiments.
   * Adam at 1e-5 rather than the paper's SGD at 1e-7. The original schedule needs its full 400-epoch
     run to get anywhere; Adam gets a usable model in a few thousand steps, which is the point of this
     exercise. The trade-off is stated rather than hidden.
@@ -84,9 +88,18 @@ class Set:
         return len(self.im)
 
     def crop(self, i, size, rng):
-        """A random `size`x`size` crop with a random horizontal flip, and the matching target."""
+        """A random `size`x`size` crop with a random horizontal flip, and the matching target.
+        `size <= 0` means the whole image (rectangular), which is the paper's protocol."""
         img, gt = self.im[i], self.gt[i]
         h, w, _ = img.shape
+        if size <= 0:
+            h -= h % self.down
+            w -= w % self.down
+            sub, m = img[:h, :w], gt[: h // self.down, : w // self.down]
+            if rng.random() < 0.5:
+                sub, m = sub[:, ::-1], m[:, ::-1]
+            x = ((sub.astype(np.float32) / 255.0 - MEAN) / SD).transpose(2, 0, 1)
+            return np.ascontiguousarray(x), np.ascontiguousarray(m)[None]
         s = min(size, h - h % self.down, w - w % self.down)
         y0 = int(rng.integers(0, max(1, h - s + 1)))
         x0 = int(rng.integers(0, max(1, w - s + 1)))
@@ -130,7 +143,8 @@ def main():
     ap.add_argument("--export", default="", help="write the trained weights back into an ONNX")
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--crop", type=int, default=384)
+    ap.add_argument("--crop", type=int, default=0,
+                    help="0 = whole images (the paper's protocol, batch forced to 1); N = NxN crops")
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--adaptive", action="store_true", help="Part A's adaptive sigma (default: fixed 15)")
     ap.add_argument("--sigma", type=float, default=15.0)
@@ -142,9 +156,14 @@ def main():
                     help="print only `step N loss X` — what the C++/Python parity test compares")
     a = ap.parse_args()
 
+    if a.crop <= 0 and a.batch != 1:
+        # whole images differ in size, so they cannot be stacked; the paper trains at batch 1
+        print("whole-image training: forcing --batch 1 (was %d)" % a.batch)
+        a.batch = 1
     if not a.dump_loss:
-        print("train: %s, crop %d, batch %d, lr %g, %s sigma, device %s"
-              % (a.data, a.crop, a.batch, a.lr, "adaptive" if a.adaptive else "fixed", a.device))
+        print("train: %s, %s, batch %d, lr %g, %s sigma, device %s"
+              % (a.data, ("whole images" if a.crop <= 0 else "crop %d" % a.crop), a.batch, a.lr,
+                 "adaptive" if a.adaptive else "fixed", a.device))
     train = Set(list_split(a.data, "train"), a.adaptive, sigma=a.sigma, verbose=not a.dump_loss)
     test = Set(list_split(a.data, "test"), a.adaptive, sigma=a.sigma, verbose=not a.dump_loss) \
         if a.eval_every else None
@@ -184,13 +203,15 @@ def main():
                   flush=True)
         if test is not None and a.eval_every and step % a.eval_every == 0 and not a.dump_loss:
             mae, rmse = evaluate(model, test, a.device, a.eval_limit)
+            tr_mae, _ = evaluate(model, train, a.device, min(60, len(train)))
             tag = ""
             if mae < best[0]:
                 best = (mae, step)
                 tag = "  <- best"
                 if a.export:
                     C.save_onnx(model, a.init or a.export, a.export)
-            print("  eval @%d: test MAE %.2f  RMSE %.2f%s" % (step, mae, rmse, tag), flush=True)
+            print("  eval @%d: test MAE %.2f  RMSE %.2f   (train MAE %.2f)%s"
+                  % (step, mae, rmse, tr_mae, tag), flush=True)
 
     if not a.dump_loss:
         print("best test MAE %.2f at step %d" % best)
