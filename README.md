@@ -26,6 +26,7 @@
 
 ```sh
 sh build/gcc.sh pure/crowd.cpp -o crowd.exe
+EXTRA="-DUSE_EIGEN" sh build/gcc.sh pure/crowd.cpp -o crowd.exe   # 学習が 10.7 倍速い（実測）
 sh build/gcc.sh pure/gradcheck.cpp -o gradcheck.exe && ./gradcheck.exe   # dilated conv の勾配
 
 # 出発点のモデルを C++ が書く（VGG-16 前段の転移つき。--decoder 4 で FIDTM 用の 1/2 出力）
