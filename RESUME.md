@@ -12,7 +12,9 @@
 | dilated conv の勾配（新規） | dilation 1/2/3 で解析勾配と中心差分が 3e-04 以下一致 |
 | CSRNet のパラメータ数 | 16,263,489 = 論文の 16.26M |
 | ONNX 妥当性 | `onnx.checker` PASS、onnxruntime 実行可 `[1,3,384,384]` → `[1,1,48,48]` |
-| 自作ランタイム ⇔ onnxruntime | 同一入力で count 338.27 / 338.2708、max 0.1532 / 0.153233 |
+| 自作ランタイム ⇔ onnxruntime（ランダム初期化） | 同一入力で count 338.27 / 338.2708、max 0.1532 / 0.153233 |
+| VGG-16 前段の転移 | conv4_3 の活性が torchvision と**相対 7.9e-07**（活性の最大 21.7 に対し max 差 1.7e-05） |
+| 自作ランタイム ⇔ onnxruntime（**dilated conv 6 本を通した後**） | count -2028.06 / -2028.0618、max -0.8683 / -0.868379 |
 
 ## マイルストーン
 
@@ -22,9 +24,10 @@
       勾配は forward だけ見ても分からない（backward に 2 箇所入る）ので `pure/gradcheck.cpp` で縛る。
 - [x] **M2 CSRNet のグラフ生成（C++）** — `crowd init-csrnet`。`--from-pt` で torchvision の
       VGG-16 から前段を転移できる形にした（パラメータ名を state_dict 名に合わせてある）。
-- [ ] **M3 VGG-16 転移の検証** — `--from-pt vgg16.pth` で前段を載せ、torchvision の前段出力と
-      突き合わせる（1e-4 以内）。ランダム初期化では ReLU が死んでマップが一定になるので、
-      ここを通さないと学習が始まらない。
+- [x] **M3 VGG-16 転移の検証** — `--from-pt` で前段 20 テンソル（conv1_1..conv4_3 の重みと bias）が
+      載り、後段 14 テンソル（dilated conv 6 本＋1x1）だけが新規になる。
+      **conv4_3 の活性を torchvision と比較して相対 7.9e-07**（`tools/parity/vgg_front.py`）。
+      純 C++ の `.pt` リーダ（`pure/ptio.hpp`）でここまで通るので、転移に Python は要らない。
 - [ ] **M4 データ** — ShanghaiTech Part A/B。点アノテーションが `.mat`（MATLAB v5）なので、
       両言語で読める形にするコンバータが要る。密度ラベル（ガウシアン）生成も両言語。
 - [ ] **M5 学習（両言語）** — MSE で密度回帰。Python は torch、C++ は ONNX グラフ直接学習
@@ -36,11 +39,10 @@
 
 ## 次の一手
 
-1. **VGG-16 の重みを取ってきて `--from-pt` を通す**（M3）。torchvision の `vgg16.pth` は
-   `features.<n>.weight` という名前で、こちらのグラフもその名前で作ってあるので載るはず。
-   検証は「前段の出力を torchvision と比べて 1e-4」。
-2. ShanghaiTech の取得と `.mat` リーダ（M4）。Kaggle にミラーがあるので、姉妹リポの kbridge 経路が使える。
-3. 密度ラベル生成を両言語で（ガウシアン σ は固定 15 か適応 kNN。CSRNet 論文は Part A が適応、B が固定 15）。
+1. **ShanghaiTech の取得と `.mat` リーダ**（M4）。Kaggle にミラーがあるので、姉妹リポの kbridge 経路が使える。
+2. 密度ラベル生成を両言語で（ガウシアン σ は固定 15 か適応 kNN。CSRNet 論文は Part A が適応、B が固定 15）。
+3. 学習（M5）。後段が未学習だと出力はほぼ一定の DC 成分になる（実測: count -2028 が画像を変えても
+   -2027.4、分散 1.3e-05）。ここが動き出すのが「学習できている」の最初の証拠になる。
 
 ## 未確認事項
 

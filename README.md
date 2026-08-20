@@ -34,7 +34,8 @@ sh build/gcc.sh pure/gradcheck.cpp -o gradcheck.exe && ./gradcheck.exe
 | dilated conv の勾配 | dilation 1/2/3 で解析勾配と中心差分が **3e-04 以下**一致（`pure/gradcheck.cpp`） |
 | CSRNet のパラメータ数 | **16,263,489** = 論文の 16.26M と一致 |
 | ONNX の妥当性 | `onnx.checker` PASS、onnxruntime で実行可（`[1,3,384,384]` → density `[1,1,48,48]`） |
-| 自作ランタイム ⇔ onnxruntime | 同じ画像で count **338.27 / 338.2708**、max 0.1532 / 0.153233 |
+| 自作ランタイム ⇔ onnxruntime | 同じ画像で count **338.27 / 338.2708**、max 0.1532 / 0.153233。dilated conv 6 本を通した後でも -2028.06 / -2028.0618 |
+| VGG-16 前段の転移（`--from-pt`） | conv4_3 の活性が torchvision と**相対 7.9e-07** 一致（`tools/parity/vgg_front.py`）。純 C++ の `.pt` リーダ経由 |
 
 （この count に意味は無い。ランダム初期化だと ReLU が大半死んでマップがほぼ一定になる ＝ マップの分散
 1.7e-06。CSRNet が VGG-16 の**事前学習**前段を要求する理由がそのまま出ている。）
@@ -61,6 +62,7 @@ sh build/gcc.sh pure/gradcheck.cpp -o gradcheck.exe && ./gradcheck.exe
 | 機能 | Python (`tools/`) | C++ (`pure/`) | パリティの条件 |
 |---|---|---|---|
 | グラフ生成 | 予定 | `crowd init-csrnet` ✅ | 同じ ONNX が出る（重み以外バイト一致） |
+| `.pt` からの転移 | `torch.load` | `pure/ptio.hpp` ✅ | 前段の活性が torchvision と 7.9e-07 |
 | 推論 | 予定 | `crowd infer` ✅ | 同一画像で count が一致（対 onnxruntime で実測 4e-04 相対） |
 | 密度ラベル生成 | 予定 | 予定 | 同じ点群から同じマップ（バイト一致） |
 | 学習 | 予定 | 予定 | 同じ seed・同じ batch で step1 の loss が一致 |
