@@ -154,6 +154,30 @@ def peaks(m, thr=0.5, radius=1):
     return out
 
 
+def match_points(pred, gt, thr):
+    """Precision / recall / F1 with a distance threshold, matched greedily over the closest pairs.
+    The same rule as pure/density.hpp: ties broken by index so both languages agree exactly."""
+    pairs = []
+    for i, (px, py) in enumerate(pred):
+        for j, (gx, gy) in enumerate(gt):
+            d = ((px - gx) ** 2 + (py - gy) ** 2) ** 0.5
+            if d <= thr:
+                pairs.append((d, i, j))
+    pairs.sort()
+    pu, gu, tp = set(), set(), 0
+    for _d, i, j in pairs:
+        if i in pu or j in gu:
+            continue
+        pu.add(i)
+        gu.add(j)
+        tp += 1
+    fp, fn = len(pred) - tp, len(gt) - tp
+    prec = tp / len(pred) if pred else 0.0
+    rec = tp / len(gt) if gt else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return dict(tp=tp, fp=fp, fn=fn, precision=prec, recall=rec, f1=f1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mat", required=True)

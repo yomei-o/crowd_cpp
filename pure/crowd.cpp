@@ -70,6 +70,7 @@ static int cmd_init_csrnet(int argc, char** argv) {
   sp.width = (float)atof(arg_of(argc, argv, "--width", "1.0").c_str());
   sp.seed = strtoull(arg_of(argc, argv, "--seed", "1234").c_str(), nullptr, 10);
   sp.dynamic = !has_flag(argc, argv, "--static");
+  sp.decoder = std::atoi(arg_of(argc, argv, "--decoder", "0").c_str());   // 0=1/8, 2=1/4, 4=1/2, 8=1/1
   const std::string out = arg_of(argc, argv, "--out", "");
   const std::string from_pt = arg_of(argc, argv, "--from-pt", "");
   if (out.empty()) {
@@ -91,8 +92,8 @@ static int cmd_init_csrnet(int argc, char** argv) {
   onx::save_onnx(g, out);
   size_t params = 0;
   for (const onx::Tensor64& t : g.init_f) params += t.data.size();
-  printf("wrote %s: CSRNet imgsz=%d width=%.2f, %zu nodes, %zu tensors, %zu parameters\n",
-         out.c_str(), sp.imgsz, sp.width, g.nodes.size(), g.init_f.size(), params);
+  printf("wrote %s: CSRNet imgsz=%d width=%.2f decoder=%d, %zu nodes, %zu tensors, %zu parameters\n",
+         out.c_str(), sp.imgsz, sp.width, sp.decoder, g.nodes.size(), g.init_f.size(), params);
   if (sp.dynamic)
     printf("  input is declared dynamic (any HxW); the density map is input/8 and its sum is the count\n");
   else

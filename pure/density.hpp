@@ -180,4 +180,47 @@ inline std::vector<std::pair<float, float>> peaks(const Map& m, float thr, int r
   return out;
 }
 
+// ---------------------------------------------------------------- localisation metric
+
+// Precision / recall / F1 of predicted points against annotated ones, with a distance threshold —
+// the standard way FIDTM-style localisation is scored. Matching is greedy over the closest pairs,
+// which is what the FIDTM authors do and what makes the number reproducible: a Hungarian assignment
+// would score a few tenths higher and is not what the published numbers mean.
+struct Loc {
+  int tp = 0, fp = 0, fn = 0;
+  double precision = 0, recall = 0, f1 = 0;
+};
+
+inline Loc match_points(std::vector<std::pair<float, float>> pred,
+                        std::vector<std::pair<float, float>> gt, float thr) {
+  Loc r;
+  std::vector<char> used(gt.size(), 0);
+  // sort candidate pairs by distance and take them greedily
+  struct Pair { float d; int p, g; };
+  std::vector<Pair> pairs;
+  for (size_t i = 0; i < pred.size(); ++i)
+    for (size_t j = 0; j < gt.size(); ++j) {
+      const float dx = pred[i].first - gt[j].first, dy = pred[i].second - gt[j].second;
+      const float d = std::sqrt(dx * dx + dy * dy);
+      if (d <= thr) pairs.push_back({d, (int)i, (int)j});
+    }
+  std::sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) {
+    if (a.d != b.d) return a.d < b.d;
+    if (a.p != b.p) return a.p < b.p;           // ties by index, so the result is deterministic
+    return a.g < b.g;
+  });
+  std::vector<char> pused(pred.size(), 0);
+  for (const Pair& q : pairs) {
+    if (pused[(size_t)q.p] || used[(size_t)q.g]) continue;
+    pused[(size_t)q.p] = used[(size_t)q.g] = 1;
+    ++r.tp;
+  }
+  r.fp = (int)pred.size() - r.tp;
+  r.fn = (int)gt.size() - r.tp;
+  r.precision = pred.empty() ? 0 : (double)r.tp / pred.size();
+  r.recall = gt.empty() ? 0 : (double)r.tp / gt.size();
+  r.f1 = (r.precision + r.recall) > 0 ? 2 * r.precision * r.recall / (r.precision + r.recall) : 0;
+  return r;
+}
+
 }  // namespace den

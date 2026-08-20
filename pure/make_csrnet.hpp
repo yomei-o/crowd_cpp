@@ -32,6 +32,11 @@
 namespace csr {
 
 struct Spec {
+  // `decoder` upsamples the 1/8 map back towards the input, for FIDTM. It is not an optional nicety:
+  // the label study in RESUME measured, on *ground-truth* FIDT maps of a dense image, that local
+  // maxima recover only 58.7% of 1546 heads at 1/8, 86.7% at 1/4 and 96.0% at 1/2. Counting is happy
+  // at 1/8; localisation is not. 0 = no decoder (CSRNet), 2 = up to 1/4, 4 = up to 1/2, 8 = 1/1.
+  int decoder = 0;
   int imgsz = 384;        // the size the graph *declares*; with `dynamic` it is only a hint
   bool dynamic = true;    // declare H and W as dynamic. CSRNet is convolutional throughout, so the
                           // declared size is metadata: our own runtime derives shapes from the tensor
@@ -63,7 +68,9 @@ class Builder {
       : sp_(sp), rng_(sp.seed), src_(src) {}
 
   int taken = 0, made = 0;
+  int out_stride_ = 8;                 // the stride of the map this graph produces
   std::vector<std::string> missed;
+  int out_stride() const { return out_stride_; }
 
   onx::Graph build() {
     g_.opset = 13;
@@ -84,11 +91,26 @@ class Builder {
       x = conv_relu(x, "backend." + std::to_string(i++), cin, cout, 3, 1, 2, 2);
       cin = cout;
     }
-    // the density head: 1x1 to a single channel, no activation (the target is non-negative but the
-    // paper regresses it directly with MSE; clamping here would hide negative predictions instead of
-    // letting the loss punish them)
+    // FIDTM's decoder: nearest x2 then a 3x3 conv, repeated. Nearest rather than bilinear because the
+    // engine has an integer-factor nearest Resize and a conv after it can learn the smoothing anyway —
+    // adding a bilinear op to the runtime would buy nothing here.
+    int stride = 8;
+    int d = 0;
+    while (stride > 8 / std::max(1, sp_.decoder) && sp_.decoder > 0) {
+      const std::string u = upsample(x);
+      const int cout = std::max(16, scaled(64) >> d);
+      x = conv_relu(u, "decoder." + std::to_string(d), cin, cout, 3, 1, 1);
+      cin = cout;
+      stride /= 2;
+      ++d;
+    }
+    // the head: 1x1 to a single channel, no activation (the target is non-negative but MSE regresses
+    // it directly; clamping here would hide negative predictions instead of letting the loss punish
+    // them)
     const std::string out = conv(x, "output_layer", cin, 1, 1, 1, 0, 1, "density");
-    g_.outputs.push_back({out, {1, 1, sp_.dynamic ? -1 : sp_.imgsz / 8, sp_.dynamic ? -1 : sp_.imgsz / 8}});
+    const int64_t od = sp_.dynamic ? -1 : sp_.imgsz / stride;
+    g_.outputs.push_back({out, {1, 1, od, od}});
+    out_stride_ = stride;
     return g_;
   }
 
@@ -163,6 +185,21 @@ class Builder {
     const std::string r = uniq(mod + "/relu");
     node("Relu", {c}, r);
     return r;
+  }
+
+  std::string upsample(const std::string& in) {
+    // Resize with scales [1,1,2,2]. onnx_run reads the factor with llround, so a scale that arrives
+    // as 1.9999996 still means 2 (the sibling repo lost a whole neck to a truncating cast once).
+    const std::string sc = uniq("up/scales");
+    g_.init_f.push_back({sc, {4}, {1.f, 1.f, 2.f, 2.f}});
+    const std::string roi = uniq("up/roi");
+    g_.init_f.push_back({roi, {0}, {}});
+    const std::string o = uniq("up");
+    node("Resize", {in, roi, sc}, o,
+         {onx::Attr{"mode", onx::A_STRING, 0, 0, "nearest", {}, {}, false, 1, {}, {}, {}},
+          onx::Attr{"coordinate_transformation_mode", onx::A_STRING, 0, 0, "asymmetric", {}, {}, false, 1, {}, {}, {}},
+          onx::Attr{"nearest_mode", onx::A_STRING, 0, 0, "floor", {}, {}, false, 1, {}, {}, {}}});
+    return o;
   }
 
   std::string pool(const std::string& in) {
