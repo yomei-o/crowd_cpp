@@ -192,7 +192,8 @@ torch.save(sd, 'vgg16_front.pth')"
 **GPU**: 姉妹リポの `kaggle_server_cpp`（kbridge）経由で Kaggle の T4 x2 を使う。手順は
 あちらの `FOR_AGENTS.md`。**"VSCode Compatible URL" はそれ自体が認証情報**なので、ログにも
 コミットにも出さない（kbridge は `****` にマスクする）。セッションは切れるので都度人にもらう。
-`scratch/kb.py`（短いコマンド）と `scratch/kb_job.py`（長いジョブ）と `scratch/wait_job.py` がある。
+`scratch/kb.py`（短いコマンド）、`scratch/kb_job.py`（長いジョブ）、`scratch/wait_job.py`（完了待ち）、
+`scratch/keepalive.py`（**長い学習の間はこれを並走させる**。理由は落とし穴の表）。
 
 ## 速度 — CPU で本番学習は無理、という数字（2026-08-20 実測）
 
@@ -228,7 +229,7 @@ step 1 の loss 9596 が両言語で説明できることは確認した: VGG �
 | gradcheck を出力全体の重み付き和で作る | float32 の差分ノイズが相対 5e-3 出て、**正しいコードでも** dilation 1 で FAIL する | 出力 1 要素だけを微分し、勾配が極小（<1e-2）の入力は比較から外す |
 | 生成 ONNX を commit | CSRNet は 1 個 **62MB**。GitHub が 50MB 超で警告 | `models/*.onnx` は gitignore。1 コマンドで作り直せる |
 | 学習の途中経過が見えない | `... \| tail -45` はバッファされるので、走っている間ログが空になる | `--log <csv>`（毎行 flush）を使う。`grep -E 'eval @'` は完了後にしか出ない |
-| **Kaggle セッションは公称 9 時間もたない** | 今日 3 本使って、最後のものは **1 時間 50 分〜2 時間 45 分**で 502 になった（公称は GPU 9 時間・週 30 時間）。20000 step の学習 2 本と、書き出し済みの best モデルと CSV を失った | 原因はおそらく **Jupyter セッションの keep-alive がブラウザのタブ依存**（kbridge のプロキシ叩きは heartbeat にならない）。対策は 2 つ: ①成果物は書かれた時点で `curl "$KB/download?path=...&raw=1" -o` で引き取る ②**学習を `--resume` 可能にする**（`pure/trainrt.hpp` はもうある。次の一手 1 番） |
+| **Kaggle セッションは公称 9 時間もたない** | 今日 3 本使って、最後のものは **1 時間 50 分〜2 時間 45 分**で 502 になった（公称は GPU 9 時間・週 30 時間）。20000 step の学習 2 本と、書き出し済みの best モデルと CSV を失った **タイムラインを見ると原因はプロキシ経由のやりとりの途絶**らしい: こまめに `/sh` を投げていた 13:20-15:07 は生きていて、手元作業をしていて 56 分投げなかった間に死んだ。**学習はその間ずっと走っていた**ので、カーネルが計算しているかは関係なく「interaction があるか」を見ている疑いが強い（前のセッションも同じパターン）。対策 3 つ: ①`python scratch/keepalive.py --every 240 --log scratch/keepalive.log` を並走させる（仮説の検証も兼ねる。ログに生存時間が残る）②成果物は書かれた時点で `curl "$KB/download?path=...&raw=1" -o` で引き取る ③**学習を `--resume` 可能にする**（`pure/trainrt.hpp` はもうある。次の一手 1 番）|
 
 **作業上の注意**（このリポジトリを編集するとき）: Bash の heredoc は `\n` を実改行に化けさせる。
 C++/Python の文字列リテラルを含むパッチは Write/Edit ツールを使うか、`chr(92)+'n'` を使う。
