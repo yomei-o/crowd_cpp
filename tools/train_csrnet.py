@@ -66,16 +66,19 @@ class Set:
     images) that decoding once and keeping the arrays beats re-reading every epoch — and it makes the
     step time a function of the network alone, which is what the timings below mean."""
 
-    def __init__(self, items, adaptive, down=8, sigma=15.0, verbose=True):
+    def __init__(self, items, adaptive, down=8, sigma=15.0, verbose=True, fidt=False):
         from PIL import Image
-        self.im, self.gt, self.n = [], [], []
+        self.im, self.gt, self.n, self.pts = [], [], [], []
+        self.fidt = fidt
         t0 = time.time()
         for k, (ip, gp) in enumerate(items):
             img = np.asarray(Image.open(ip).convert("RGB"), np.uint8)
             pts = D.load_points(gp)
             h, w, _ = img.shape
             self.im.append(img)
-            self.gt.append(D.density(pts, w, h, down=down, sigma=sigma, adaptive=adaptive))
+            self.pts.append(pts)
+            self.gt.append(D.fidt(pts, w, h, down=down) if fidt
+                           else D.density(pts, w, h, down=down, sigma=sigma, adaptive=adaptive))
             self.n.append(len(pts))
             if verbose and (k + 1) % 100 == 0:
                 print("  prepared %d/%d (%.1fs)" % (k + 1, len(items), time.time() - t0), flush=True)
@@ -136,6 +139,28 @@ def evaluate(model, ds, device, limit=0):
     return float(np.abs(e).mean()), float(np.sqrt((e ** 2).mean()))
 
 
+@torch.no_grad()
+def evaluate_loc(model, ds, device, down, thr=8.0, peak_thr=0.5, limit=0):
+    """Localisation: peaks of the predicted FIDT map against the annotated points, as precision /
+    recall / F1 at a distance threshold in *image* pixels. This is the number FIDTM exists for; a
+    density model's count MAE says nothing about whether the positions are right."""
+    model.eval()
+    tp = fp = fn = 0
+    n = len(ds) if limit <= 0 else min(limit, len(ds))
+    for i in range(n):
+        x, _ = ds.whole(i)
+        m = model(torch.from_numpy(x).to(device))[0, 0].cpu().numpy()
+        pk = [(px * down, py * down) for px, py in D.peaks(m, peak_thr, 1)]
+        r = D.match_points(pk, [tuple(p) for p in ds.pts[i]], thr)
+        tp += r["tp"]
+        fp += r["fp"]
+        fn += r["fn"]
+    model.train()
+    prec = tp / (tp + fp) if tp + fp else 0.0
+    rec = tp / (tp + fn) if tp + fn else 0.0
+    return prec, rec, (2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="a ShanghaiTech part_A / part_B directory")
@@ -161,6 +186,12 @@ def main():
                          "barely constrains a uniform offset — 0.01 per cell over 12288 cells is 123 "
                          "heads of error but only 1.2 of loss — so the metric we report is nearly "
                          "unconstrained by the loss we train. This term constrains it directly.")
+    ap.add_argument("--fidt", action="store_true",
+                    help="train the FIDT target instead of a density map, and report localisation F1 "
+                         "instead of count MAE. Use with a decoder graph (--decoder 2|4): the label "
+                         "study measured F1 ceilings of 0.737 at 1/8, 0.933 at 1/4 and 0.981 at 1/2.")
+    ap.add_argument("--down", type=int, default=8, help="the graph's output stride (decoder 2 -> 4, 4 -> 2)")
+    ap.add_argument("--loc-thr", dest="loc_thr", type=float, default=8.0)
     ap.add_argument("--adaptive", action="store_true", help="Part A's adaptive sigma (default: fixed 15)")
     ap.add_argument("--sigma", type=float, default=15.0)
     ap.add_argument("--eval-every", dest="eval_every", type=int, default=250)
@@ -198,7 +229,7 @@ def main():
     rng = np.random.default_rng(a.seed)
     torch.manual_seed(a.seed)
 
-    if test is not None and not a.dump_loss:
+    if test is not None and not a.dump_loss and not a.fidt:
         mae, rmse = evaluate(model, test, a.device, a.eval_limit)
         print("step 0: test MAE %.2f  RMSE %.2f  (before training)" % (mae, rmse), flush=True)
 
@@ -235,7 +266,20 @@ def main():
         elif step % 25 == 0 or step == 1:
             print("  step %5d/%d  loss %10.3f  %5.1fs" % (step, a.steps, run, time.time() - t0),
                   flush=True)
-        if test is not None and a.eval_every and step % a.eval_every == 0 and not a.dump_loss:
+        if test is not None and a.eval_every and step % a.eval_every == 0 and not a.dump_loss and a.fidt:
+            pr, rc, f1 = evaluate_loc(model, test, a.device, a.down, a.loc_thr, limit=a.eval_limit)
+            tag = ""
+            if -f1 < best[0]:
+                best = (-f1, step)
+                tag = "  <- best"
+                if a.export:
+                    C.save_onnx(model, a.init or a.export, a.export)
+            print("  eval @%d: F1 %.4f  (precision %.4f  recall %.4f)%s" % (step, f1, pr, rc, tag),
+                  flush=True)
+            if log:
+                log.write("%d,,%.3e,%.4f,%.4f,%.4f" % (step, opt.param_groups[0]["lr"], f1, pr, rc)
+                          + chr(10))
+        elif test is not None and a.eval_every and step % a.eval_every == 0 and not a.dump_loss:
             mae, rmse = evaluate(model, test, a.device, a.eval_limit)
             tr_mae, _ = evaluate(model, train, a.device, min(60, len(train)))
             tag = ""
@@ -251,7 +295,10 @@ def main():
                                                        tr_mae) + chr(10))
 
     if not a.dump_loss:
-        print("best test MAE %.2f at step %d" % best)
+        if a.fidt:
+            print("best F1 %.4f at step %d" % (-best[0], best[1]))
+        else:
+            print("best test MAE %.2f at step %d" % best)
         if a.export and best[1] == 0:
             C.save_onnx(model, a.init or a.export, a.export)
     return 0
