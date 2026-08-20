@@ -81,13 +81,44 @@ inline std::vector<Item> read_split(const std::string& part_dir, const std::stri
 }
 
 struct Batch {
-  Tensor x;                            // [N,3,side,side]
-  std::vector<float> y;                // [N,1,side/down,side/down]
+  Tensor x;                            // [N,3,H,W]
+  std::vector<float> y;                // [N,1,H/down,W/down]
   int mw = 0, mh = 0;
 };
 
+// `side <= 0` means the whole image, batch 1 — the reference implementation's protocol
+// (leeyeehoo/CSRNet-pytorch: batch 1, no crop, its crop branch is disabled). Measured why it matters:
+// with 384 crops the model learns a near-uniform positive level, which costs little on a crop and
+// five times the area on a whole image (RESUME has the numbers).
+inline Batch make_whole(const std::vector<Item>& items, size_t i, Rng& rng, const den::Cfg& cfg) {
+  Batch b;
+  const Item& it = items[i];
+  const int w = it.w - it.w % cfg.down, h = it.h - it.h % cfg.down;
+  b.mw = w / cfg.down;
+  b.mh = h / cfg.down;
+  b.x = make_tensor({1, 3, h, w}, false);
+  const bool flip = rng.unit() < 0.5;
+  const float mean[3] = {0.485f, 0.456f, 0.406f}, sd[3] = {0.229f, 0.224f, 0.225f};
+  for (int c = 0; c < 3; ++c)
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+        const int sx = flip ? (w - 1 - x) : x;
+        const float v = it.px[((size_t)y * it.w + sx) * 3 + c] / 255.f;
+        b.x->data[((size_t)c * h + y) * w + x] = (v - mean[c]) / sd[c];
+      }
+  b.y.assign((size_t)b.mw * b.mh, 0.f);
+  for (int y = 0; y < b.mh; ++y)
+    for (int x = 0; x < b.mw; ++x) {
+      const int sx = flip ? (b.mw - 1 - x) : x;
+      if (sx < it.target.w && y < it.target.h)
+        b.y[(size_t)y * b.mw + x] = it.target.v[(size_t)y * it.target.w + sx];
+    }
+  return b;
+}
+
 inline Batch make_batch(const std::vector<Item>& items, int side, int batch, Rng& rng,
                         const den::Cfg& cfg) {
+  if (side <= 0) return make_whole(items, (size_t)rng.below((uint64_t)items.size()), rng, cfg);
   Batch b;
   const int ms = side / cfg.down;
   b.mw = b.mh = ms;
@@ -114,12 +145,24 @@ inline Batch make_batch(const std::vector<Item>& items, int side, int batch, Rng
   return b;
 }
 
-// summed squared error over the map, averaged over the batch
-inline Tensor mse_sum(const Tensor& pred, const std::vector<float>& target, int batch) {
+// Summed squared error over the map, averaged over the batch — the reference implementation's
+// `MSELoss(size_average=False)` with batch 1.
+//
+// `count_weight` adds (sum(pred) - sum(target))^2 on top. The reason it exists is measured, not
+// aesthetic: a summed MSE barely constrains a uniform offset. An offset of 0.01 per cell over 12288
+// cells is 123 heads of error but only 1.2 of loss, so the quantity we report (the count) is nearly
+// free to drift while the loss falls. Off by default, because the reference does not use it.
+inline Tensor mse_sum(const Tensor& pred, const std::vector<float>& target, int batch,
+                      float count_weight = 0.f) {
   Tensor t = make_tensor(pred->shape, false);
   t->data = target;
   Tensor d = sub(pred, t);
-  return mul_scalar(sum(mul(d, d)), 1.f / (float)std::max(1, batch));
+  Tensor loss = mul_scalar(sum(mul(d, d)), 1.f / (float)std::max(1, batch));
+  if (count_weight > 0.f) {
+    Tensor ds = sum(d);                                   // sum(pred) - sum(target)
+    loss = add(loss, mul_scalar(mul(ds, ds), count_weight / (float)std::max(1, batch)));
+  }
+  return loss;
 }
 
 // MAE / RMSE of the predicted count against the annotation, on whole images — the number the CSRNet

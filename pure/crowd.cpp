@@ -115,8 +115,12 @@ static int cmd_train(int argc, char** argv) {
   const std::string out = arg_of(argc, argv, "--export", "");
   const int steps = std::atoi(arg_of(argc, argv, "--steps", "100").c_str());
   const int batch = std::atoi(arg_of(argc, argv, "--batch", "4").c_str());
-  const int crop = std::atoi(arg_of(argc, argv, "--crop", "384").c_str());
+  int crop = std::atoi(arg_of(argc, argv, "--crop", "0").c_str());   // 0 = whole images (the paper's)
   const float lr = (float)atof(arg_of(argc, argv, "--lr", "1e-5").c_str());
+  const std::string optim = arg_of(argc, argv, "--optim", "adam");
+  const float momentum = (float)atof(arg_of(argc, argv, "--momentum", "0.95").c_str());
+  const float wd = (float)atof(arg_of(argc, argv, "--weight-decay", "5e-4").c_str());
+  const float count_w = (float)atof(arg_of(argc, argv, "--count-weight", "0").c_str());
   const int eval_every = std::atoi(arg_of(argc, argv, "--eval-every", "0").c_str());
   const int eval_limit = std::atoi(arg_of(argc, argv, "--eval-limit", "0").c_str());
   const uint64_t seed = strtoull(arg_of(argc, argv, "--seed", "1234").c_str(), nullptr, 10);
@@ -142,10 +146,17 @@ static int cmd_train(int argc, char** argv) {
   if (!dump_loss) {
     printf("%s: %zu trainable tensors, %zu parameters\n", init.c_str(), t.params.size(),
            onx::param_count(t));
-    printf("data: %zu train / %zu test images, crop %d, batch %d, lr %g, %s sigma\n",
-           train.size(), test.size(), crop, batch, lr, cfg.adaptive ? "adaptive" : "fixed");
+    printf("data: %zu train / %zu test images, %s, batch %d, %s lr %g%s, %s sigma\n",
+           train.size(), test.size(), crop <= 0 ? "whole images" : "crops",
+           crop <= 0 ? 1 : batch, optim.c_str(), lr,
+           count_w > 0 ? " (+count term)" : "", cfg.adaptive ? "adaptive" : "fixed");
   }
-  Adam opt(t.params, lr, 0.9f, 0.999f, 1e-8f, 0.f, false);
+  // SGD momentum 0.95 / wd 5e-4 is the reference implementation's recipe
+  // (leeyeehoo/CSRNet-pytorch, lr 1e-7 constant); Adam converges faster on a small step budget but
+  // moves the map's DC level around, and the count is what that hurts.
+  const bool use_sgd = optim == "sgd";
+  SGD sgd(t.params, lr, momentum, wd, false);
+  Adam adam(t.params, lr, 0.9f, 0.999f, 1e-8f, 0.f, false);
   Rng rng(seed);
   double run = -1;
   double best = 1e9;
@@ -154,10 +165,10 @@ static int cmd_train(int argc, char** argv) {
     csrt::Batch b = csrt::make_batch(train, crop, batch, rng, cfg);
     std::map<std::string, Tensor> vals = onx::run_onnx(t.g, b.x, {}, &t.init, false);
     Tensor pred = vals.at(t.g.outputs[0].name);
-    Tensor loss = csrt::mse_sum(pred, b.y, batch);
-    opt.zero_grad();
+    Tensor loss = csrt::mse_sum(pred, b.y, crop <= 0 ? 1 : batch, count_w);
+    if (use_sgd) sgd.zero_grad(); else adam.zero_grad();
     backward(loss);
-    opt.step();
+    if (use_sgd) { sgd.lr = lr; sgd.step(); } else { adam.lr = lr; adam.step(); }
     const double lv = loss->data[0];
     run = run < 0 ? lv : 0.9 * run + 0.1 * lv;
     free_graph(loss);

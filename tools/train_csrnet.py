@@ -150,6 +150,8 @@ def main():
                     help="sgd is the paper's recipe (momentum 0.95); adam converges faster but its "
                          "steps move the map's DC level around, and the *count* is what that hurts")
     ap.add_argument("--momentum", type=float, default=0.95)
+    ap.add_argument("--weight-decay", dest="wd", type=float, default=5e-4,
+                    help="the reference implementation's value (leeyeehoo/CSRNet-pytorch)")
     ap.add_argument("--count-weight", dest="count_weight", type=float, default=0.0,
                     help="add this times (sum(pred)-sum(target))^2 / N to the loss. The summed MSE "
                          "barely constrains a uniform offset — 0.01 per cell over 12288 cells is 123 "
@@ -182,7 +184,12 @@ def main():
     if a.init:
         C.load_onnx(model, a.init, verbose=not a.dump_loss)
     model.to(a.device).train()
-    opt = (torch.optim.SGD(model.parameters(), lr=a.lr, momentum=a.momentum)
+    # The reference implementation (leeyeehoo/CSRNet-pytorch, the paper's first author) uses SGD at a
+    # *constant* 1e-7 with momentum 0.95 and weight decay 5e-4, batch 1 on whole images, summed MSE —
+    # all of which match what is here — for 400 epochs over a list repeated 4x, i.e. ~480,000 steps.
+    # Its `adjust_learning_rate` has scales [1,1,1,1], so there is no decay to copy. The only real
+    # differences from this file were the optimiser and the budget.
+    opt = (torch.optim.SGD(model.parameters(), lr=a.lr, momentum=a.momentum, weight_decay=a.wd)
            if a.optim == "sgd" else torch.optim.Adam(model.parameters(), lr=a.lr))
     rng = np.random.default_rng(a.seed)
     torch.manual_seed(a.seed)
