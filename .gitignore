@@ -1,5 +1,8 @@
 data/
-scratch/
+# `scratch/` (with the slash) excludes the directory itself, and git never looks inside an excluded
+# directory — so a `!scratch/x.py` exception under it can never match. `scratch/*` excludes the
+# *contents*, which is what makes the exceptions below work.
+scratch/*
 !scratch/keepalive.py
 !scratch/kb.py
 !scratch/kb_job.py
