@@ -146,6 +146,15 @@ def main():
     ap.add_argument("--crop", type=int, default=0,
                     help="0 = whole images (the paper's protocol, batch forced to 1); N = NxN crops")
     ap.add_argument("--lr", type=float, default=1e-5)
+    ap.add_argument("--optim", default="adam", choices=["adam", "sgd"],
+                    help="sgd is the paper's recipe (momentum 0.95); adam converges faster but its "
+                         "steps move the map's DC level around, and the *count* is what that hurts")
+    ap.add_argument("--momentum", type=float, default=0.95)
+    ap.add_argument("--count-weight", dest="count_weight", type=float, default=0.0,
+                    help="add this times (sum(pred)-sum(target))^2 / N to the loss. The summed MSE "
+                         "barely constrains a uniform offset — 0.01 per cell over 12288 cells is 123 "
+                         "heads of error but only 1.2 of loss — so the metric we report is nearly "
+                         "unconstrained by the loss we train. This term constrains it directly.")
     ap.add_argument("--adaptive", action="store_true", help="Part A's adaptive sigma (default: fixed 15)")
     ap.add_argument("--sigma", type=float, default=15.0)
     ap.add_argument("--eval-every", dest="eval_every", type=int, default=250)
@@ -161,8 +170,9 @@ def main():
         print("whole-image training: forcing --batch 1 (was %d)" % a.batch)
         a.batch = 1
     if not a.dump_loss:
-        print("train: %s, %s, batch %d, lr %g, %s sigma, device %s"
-              % (a.data, ("whole images" if a.crop <= 0 else "crop %d" % a.crop), a.batch, a.lr,
+        print("train: %s, %s, batch %d, %s lr %g%s, %s sigma, device %s"
+              % (a.data, ("whole images" if a.crop <= 0 else "crop %d" % a.crop), a.batch, a.optim,
+                 a.lr, (", count weight %g" % a.count_weight) if a.count_weight > 0 else "",
                  "adaptive" if a.adaptive else "fixed", a.device))
     train = Set(list_split(a.data, "train"), a.adaptive, sigma=a.sigma, verbose=not a.dump_loss)
     test = Set(list_split(a.data, "test"), a.adaptive, sigma=a.sigma, verbose=not a.dump_loss) \
@@ -172,7 +182,8 @@ def main():
     if a.init:
         C.load_onnx(model, a.init, verbose=not a.dump_loss)
     model.to(a.device).train()
-    opt = torch.optim.Adam(model.parameters(), lr=a.lr)
+    opt = (torch.optim.SGD(model.parameters(), lr=a.lr, momentum=a.momentum)
+           if a.optim == "sgd" else torch.optim.Adam(model.parameters(), lr=a.lr))
     rng = np.random.default_rng(a.seed)
     torch.manual_seed(a.seed)
 
@@ -191,6 +202,9 @@ def main():
         p = model(x)
         # summed MSE, averaged over the batch (see the module docstring)
         loss = ((p - y) ** 2).sum() / x.shape[0]
+        if a.count_weight > 0:
+            dc = (p.sum(dim=(1, 2, 3)) - y.sum(dim=(1, 2, 3))) ** 2
+            loss = loss + a.count_weight * dc.mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
