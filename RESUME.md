@@ -24,14 +24,20 @@ FIDTM（位置推定）は部品が全部揃って、学習だけが残ってい
 
 ## 次の一手（優先順）
 
-1. **20000 step の学習をやり直す**（前回はセッション落ちで step 8000 で消えた。下の「学習の記録」）。
+1. **学習に `--resume` を配線する**（これを先にやる）。`pure/trainrt.hpp` は姉妹リポから移植済みで、
+   チェックポイント（重み・optimizer の moment・rng・総ステップ数）と早期打ち切りと CSV ログを持って
+   いるのに、`crowd train` にも `tools/train_csrnet.py` にも繋いでいない。姉妹リポでは
+   「予定 N step のうち K で止めて再開」が無停止運転と**表示桁まで一致**するところまで検証してある。
+   Kaggle セッションは公称 9 時間だが**実測では 2〜3 時間で落ちた**（下の落とし穴）ので、
+   中断・再開できることが長い学習の前提になる。Python 側は torch の `state_dict` を使えば数十行。
+2. **20000 step の学習をやり直す**（前回はセッション落ちで step 8000 で消えた。下の「学習の記録」）。
    有望なのは **cosine（`--lr 2e-6 --lr-final 0.02`）** で、8000 step で MAE 43.6・まだ下降中だった。
-   **eval ごとにモデルを引き取ること**（落とし穴の表を見よ）。完走したら自作 C++ ランタイムでも
-   同じ MAE が出るかを確認する（**ここまでやれば M6 完了**）。
+   **eval ごとにモデルを引き取り、`--resume` で再開できる状態にしてから回すこと**（落とし穴の表）。
+   完走したら自作 C++ ランタイムでも同じ MAE が出るかを確認する（**ここまでやれば M6 完了**）。
    ```sh
    python tools/train_csrnet.py --data ../sht/ShanghaiTech/part_B --init models/csrnet_vgg.onnx        --steps 20000 --lr 2e-6 --lr-final 0.02 --eval-every 2000 --eval-limit 120        --log run.csv --export models/csrnet_B.onnx
    ```
-2. **FIDTM の学習（M7）**。部品は全部ある:
+3. **FIDTM の学習（M7）**。部品は全部ある:
    ```sh
    ./crowd init-csrnet --out models/fidt.onnx --decoder 4 --from-pt vgg16_front.pth   # 1/2 出力
    python tools/train_csrnet.py --data <part>/part_B --init models/fidt.onnx --fidt --down 2 \
@@ -40,12 +46,12 @@ FIDTM（位置推定）は部品が全部揃って、学習だけが残ってい
    **FIDTM はクロップ学習・batch 8 が使える**（指標が局所的なので合計を守る必要がない）。CSRNet が
    丸ごと1枚 batch 1 に縛られたのとは逆で、予算に対する効率は良いはず。これは予想なので測って確かめる。
    期待値の基準はラベル側の天井（1/2 で F1 0.981）。
-3. ~~C++ 側にも FIDT 学習と F1 評価を入れる~~ → **完了**（2026-08-20）。
+4. ~~C++ 側にも FIDT 学習と F1 評価を入れる~~ → **完了**（2026-08-20）。
    `crowd train --fidt --down 2 --loc-thr 8` で FIDT を学習し、評価が F1 に切り替わる
    （デコーダ込み 38 テンソルが学習対象、未学習の初期値は F1 0.0000 ＝ 期待どおり）。
-4. **軽量版（M8）**。`--width 0.25` あたりで学習し、WASM に載せる。CSRNet は 16M パラメータ = 62MB
+5. **軽量版（M8）**。`--width 0.25` あたりで学習し、WASM に載せる。CSRNet は 16M パラメータ = 62MB
    あるので、ブラウザに載せるには軽量化が前提。
-5. P2PNet（M9）は FIDTM の F1 を見てから判断する。
+6. P2PNet（M9）は FIDTM の F1 を見てから判断する。
 
 ## マイルストーン
 
@@ -222,7 +228,7 @@ step 1 の loss 9596 が両言語で説明できることは確認した: VGG �
 | gradcheck を出力全体の重み付き和で作る | float32 の差分ノイズが相対 5e-3 出て、**正しいコードでも** dilation 1 で FAIL する | 出力 1 要素だけを微分し、勾配が極小（<1e-2）の入力は比較から外す |
 | 生成 ONNX を commit | CSRNet は 1 個 **62MB**。GitHub が 50MB 超で警告 | `models/*.onnx` は gitignore。1 コマンドで作り直せる |
 | 学習の途中経過が見えない | `... \| tail -45` はバッファされるので、走っている間ログが空になる | `--log <csv>`（毎行 flush）を使う。`grep -E 'eval @'` は完了後にしか出ない |
-| **Kaggle セッションは落ちる** | 20000 step を 2 本、1 時間走らせたところで 502 になり、プロセスと書き出し済みモデルと CSV を失った（step 8000 の数字だけが会話に残った） | **成果物は書かれた時点で引き取る**。eval ごとに `curl "$KB/download?path=<repo>/models/x.onnx&raw=1" -o` する。9 時間の上限より先に落ちる前提で組む |
+| **Kaggle セッションは公称 9 時間もたない** | 今日 3 本使って、最後のものは **1 時間 50 分〜2 時間 45 分**で 502 になった（公称は GPU 9 時間・週 30 時間）。20000 step の学習 2 本と、書き出し済みの best モデルと CSV を失った | 原因はおそらく **Jupyter セッションの keep-alive がブラウザのタブ依存**（kbridge のプロキシ叩きは heartbeat にならない）。対策は 2 つ: ①成果物は書かれた時点で `curl "$KB/download?path=...&raw=1" -o` で引き取る ②**学習を `--resume` 可能にする**（`pure/trainrt.hpp` はもうある。次の一手 1 番） |
 
 **作業上の注意**（このリポジトリを編集するとき）: Bash の heredoc は `\n` を実改行に化けさせる。
 C++/Python の文字列リテラルを含むパッチは Write/Edit ツールを使うか、`chr(92)+'n'` を使う。
