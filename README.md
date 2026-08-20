@@ -1,8 +1,11 @@
 # crowd_cpp — 群衆の数え上げと人の位置推定を C++ と Python の両方で
 
-密度マップ回帰（CSRNet）から始めて、人の位置が出せる方式（FIDTM）まで。**学習も推論も評価も両言語**で
-でき、成果物は全段 ONNX。姉妹リポの [yolo_lpr_cpp](https://github.com/yomei-o/yolo_lpr_cpp) と同じ設計方針
-（自作エンジン＋自作 ONNX ランタイム、Python は速いだけで必須ではない、パリティはテストで縛る）。
+密度マップ回帰（**CSRNet**）から始めて、人の位置が出せる方式（**FIDTM**）まで。**学習も推論も評価も
+両言語**ででき、成果物は全段 ONNX。姉妹リポの [yolo_lpr_cpp](https://github.com/yomei-o/yolo_lpr_cpp)
+と同じ設計方針（自作エンジン＋自作 ONNX ランタイム、Python は速いだけで必須ではない、
+パリティはテストで縛る）。
+
+進捗・実測値・落とし穴・次の一手は **[RESUME.md](RESUME.md)** に集約してある。
 
 ## なぜこの順番か（手法の比較）
 
@@ -12,69 +15,89 @@
 | 手法 | 出すもの | 位置精度 | 実装コスト（このリポの都合） |
 |---|---|---|---|
 | **CSRNet**（CVPR 2018） | 密度マップのみ | 位置は出ない | 低。ただし **dilated conv が必須**（自作エンジンに無かった → 追加した） |
-| **FIDTM**（2021-22） | 1ch マップ → 局所最大で点 | 密集でも点が分離する。閾値と NMS 半径に依存 | **CSRNet の配管を再利用**＋局所最大の後処理 |
-| P2PNet（ICCV 2021） | 点を直接回帰 | 厳しい距離閾値では FIDTM より強い。後処理のヒューリスティクスが無い | Hungarian マッチングが学習ループに入る（両言語＋パリティ） |
-| CLTR / STEERER / APGCC（22-24） | 点 | さらに上 | Transformer・多スケール分離で重い |
+| **FIDTM**（2021-22） | 1ch マップ → 局所最大で点 | 密集でも点が分離する。出力解像度が天井を決める（下記） | **CSRNet の配管を再利用**＋デコーダ＋局所最大 |
+| P2PNet（ICCV 2021） | 点を直接回帰 | 厳しい距離閾値では FIDTM より強い | Hungarian マッチングが学習ループに入る |
+| CLTR / STEERER / APGCC | 点 | さらに上 | Transformer・多スケール分離で重い |
 | 頭の box を YOLO で検出 | box | 密集しすぎなければ実用十分 | 姉妹リポの一式がそのまま使える |
 
-判断基準は先に決めておく: **数え上げは MAE/MSE、位置は距離閾値つきの F1**。FIDTM の F1 が足りなければ
-P2PNet に進む。
+判断基準は先に決めてある: **数え上げは MAE/RMSE、位置は距離閾値つきの F1**。
 
 ## いま動くもの
 
 ```sh
 sh build/gcc.sh pure/crowd.cpp -o crowd.exe
-./crowd.exe init-csrnet --out models/csrnet.onnx --imgsz 384       # グラフを C++ が書く
-./crowd.exe labels --mat GT_IMG_1.mat --img IMG_1.jpg              # 密度ラベル（合計＝人数）
-./crowd.exe labels --mat GT_IMG_1.mat --img IMG_1.jpg --fidt       # FIDT マップ（極大＝頭の位置）
-./crowd.exe infer --img <画像> --model models/csrnet.onnx          # 自作ランタイムで推論
-sh build/gcc.sh pure/gradcheck.cpp -o gradcheck.exe && ./gradcheck.exe
+sh build/gcc.sh pure/gradcheck.cpp -o gradcheck.exe && ./gradcheck.exe   # dilated conv の勾配
+
+# 出発点のモデルを C++ が書く（VGG-16 前段の転移つき。--decoder 4 で FIDTM 用の 1/2 出力）
+./crowd.exe init-csrnet --out models/csrnet.onnx [--from-pt vgg16_front.pth] [--decoder 0|2|4]
+
+# ラベル（.mat を純 C++ で読む。密度なら合計＝人数、--fidt なら極大＝頭の位置）
+./crowd.exe labels --mat GT_IMG_1.mat --img IMG_1.jpg [--adaptive | --fidt]
+
+# 学習（丸ごと1枚 batch 1 が既定＝論文と同じ。--optim sgd で参照実装のレシピ）
+./crowd.exe train --data <ShanghaiTech>/part_B --init models/csrnet.onnx --steps 1000 \
+    --eval-every 200 --export models/out.onnx
+
+# 推論（自作ランタイム。任意サイズを受ける）
+./crowd.exe infer --img <画像> --model models/csrnet.onnx
 ```
+
+Python 側は `tools/csrnet.py`（ONNX を名前で読み書きする torch 実装）と
+`tools/train_csrnet.py`（学習・評価）。`--fidt` で FIDT 目標と F1 評価に切り替わる。
+
+## 検証済みの数字
 
 | 検証 | 結果 |
 |---|---|
-| dilated conv の勾配 | dilation 1/2/3 で解析勾配と中心差分が **3e-04 以下**一致（`pure/gradcheck.cpp`） |
-| CSRNet のパラメータ数 | **16,263,489** = 論文の 16.26M と一致 |
-| ONNX の妥当性 | `onnx.checker` PASS、onnxruntime で実行可（`[1,3,384,384]` → density `[1,1,48,48]`） |
-| 自作ランタイム ⇔ onnxruntime | 同じ画像で count **338.27 / 338.2708**、max 0.1532 / 0.153233。dilated conv 6 本を通した後でも -2028.06 / -2028.0618 |
-| VGG-16 前段の転移（`--from-pt`） | conv4_3 の活性が torchvision と**相対 7.9e-07** 一致（`tools/parity/vgg_front.py`）。純 C++ の `.pt` リーダ経由 |
-
-（この count に意味は無い。ランダム初期化だと ReLU が大半死んでマップがほぼ一定になる ＝ マップの分散
-1.7e-06。CSRNet が VGG-16 の**事前学習**前段を要求する理由がそのまま出ている。）
+| dilated conv の勾配 | dilation 1/2/3 で解析勾配と中心差分が **3e-04 以下** |
+| CSRNet のパラメータ数 | **16,263,489** = 論文の 16.26M |
+| ONNX の妥当性 | `onnx.checker` PASS、H/W 動的宣言で任意サイズ（ORT で 384 / 768x1024 / 664x1000） |
+| forward 三者一致 | 自作 **338.27** / onnxruntime **338.2703** / torch **338.2703** |
+| VGG-16 前段の転移 | conv4_3 の活性が torchvision と**相対 7.9e-07**（純 C++ の `.pt` リーダ経由） |
+| dilated conv 6 本通過後（自作 ⇔ ORT） | count -2028.06 / -2028.0618 |
+| ラベル生成 C++ ⇔ Python | 3 種すべて相対 **5e-06 以下**、密度の合計は点数と 2e-06、FIDT のピーク 907/907 |
+| **学習 C++ ⇔ Python（同じバッチ）** | loss **完全一致 3.453135**、勾配 34 テンソルの最悪 **2.57e-05** |
+| ラベル表現の天井（位置） | 1/8 で F1 0.737、1/4 で 0.933、**1/2 で 0.981**（precision はどれも 1.000） |
+| CSRNet の精度（Part B） | 3000 step で MAE 72.3。**論文は 10.6** — 差は予算（[RESUME](RESUME.md) に切り分け） |
 
 ## 構造（CSRNet）
 
 ```
-入力 [1,3,S,S]
+入力 [1,3,H,W]（H,W は任意）
   │
-  ├ 前段: VGG-16 の最初の 10 conv（conv1_1..conv4_3）＋ 2x2 pool 3 回     → S/8
+  ├ 前段: VGG-16 の最初の 10 conv（conv1_1..conv4_3）＋ 2x2 pool 3 回     → 1/8
   │        VGG-16 の 4 番目の pool は**落とす**（これが 1/8 を保つ仕掛け）
   │
-  ├ 後段: 3x3 conv × 6、**すべて dilation 2**（512,512,512,256,128,64）  → S/8 のまま
+  ├ 後段: 3x3 conv × 6、**すべて dilation 2**（512,512,512,256,128,64）  → 1/8 のまま
   │        受容野だけ広げて解像度を落とさない
   │
-  └ 1x1 conv → 1ch 密度マップ [1,1,S/8,S/8]   合計が人数
+  ├（FIDTM 用）デコーダ: nearest x2 ＋ 3x3 conv を 1〜3 段              → 1/4 か 1/2
+  │
+  └ 1x1 conv → 1ch マップ   密度なら合計が人数、FIDT なら極大が頭の位置
 ```
 
-パラメータ名は torchvision の VGG-16 の state_dict 名（`features.0.weight` …）にしてあるので、
-`--from-pt vgg16.pth` がテンソル単位で載る。後段は `backend.<n>.weight`。
+パラメータ名は torchvision の VGG-16 の state_dict 名（`features.0.weight` …）なので
+`--from-pt vgg16.pth` がテンソル単位で載る。後段は `backend.<n>`、デコーダは `decoder.<n>`。
 
 ## 対等性（yolo_lpr_cpp と同じ規律）
 
-| 機能 | Python (`tools/`) | C++ (`pure/`) | パリティの条件 |
+| 機能 | Python (`tools/`) | C++ (`pure/`) | パリティの条件と実測 |
 |---|---|---|---|
-| グラフ生成 | 予定 | `crowd init-csrnet` ✅ | 同じ ONNX が出る（重み以外バイト一致） |
+| グラフ生成 | — | `crowd init-csrnet` ✅ | ORT と自作ランタイムの両方が読める |
 | `.pt` からの転移 | `torch.load` | `pure/ptio.hpp` ✅ | 前段の活性が torchvision と 7.9e-07 |
-| 推論 | 予定 | `crowd infer` ✅ | 同一画像で count が一致（対 onnxruntime で実測 4e-04 相対） |
-| `.mat` 読み込み | `scipy.io.loadmat` | `pure/matio.hpp`（zlib 圧縮つき） ✅ | 同じ座標が出る |
-| ラベル生成（密度・FIDT） | `tools/density.py` ✅ | `pure/density.hpp` ✅ | 相対差 5e-06 以下、FIDT のピーク数は完全一致（`tools/parity/labels.py`） |
-| 学習 | 予定 | 予定 | 同じ seed・同じ batch で step1 の loss が一致 |
-| 評価（MAE / F1） | 予定 | 予定 | 同じデータで同じ数値 |
+| `.mat` 読み込み | `scipy.io.loadmat` | `pure/matio.hpp`（zlib 対応） ✅ | 同じ座標 |
+| ラベル生成（密度・FIDT） | `tools/density.py` ✅ | `pure/density.hpp` ✅ | 相対 5e-06 以下、ピーク数は完全一致 |
+| 学習 | `tools/train_csrnet.py` ✅ | `crowd train` ✅ | 同じバッチで loss 完全一致、勾配 2.57e-05 |
+| 評価（MAE / F1） | ✅ | MAE ✅ / F1 は配線待ち | 同じデータで同じ数値 |
+| 推論 | `csrnet.py` + ORT ✅ | `crowd infer` ✅ | forward 三者一致 |
+
+テストは `tools/parity/`（`labels.py`, `train.py`, `vgg_front.py`）と `pure/gradcheck.cpp`。
 
 ## ライセンス
 
-自前コードは BSD-3-Clause。VGG-16 の事前学習重みは torchvision（BSD-3-Clause）由来で、
-リポジトリには**含めない**（各自 `--from-pt` で渡す）。データセットも同様に含めない。
+自前コードは BSD-3-Clause。`pure/ptio.hpp` は姉妹リポ yolov8_cpp から移植（同じ作者・BSD-3-Clause）。
+VGG-16 の事前学習重みは torchvision（BSD-3-Clause）由来で、リポジトリには**含めない**
+（各自 `--from-pt` で渡す）。データセットも同様に含めない。
 
 `models/*.onnx` も git に入れない: CSRNet は 16.3M パラメータ ＝ 1 個 **62MB** あり、
 ランダム初期化のものは `crowd init-csrnet` の 1 コマンドで作り直せる。
