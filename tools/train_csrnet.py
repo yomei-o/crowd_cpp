@@ -150,6 +150,10 @@ def main():
                     help="sgd is the paper's recipe (momentum 0.95); adam converges faster but its "
                          "steps move the map's DC level around, and the *count* is what that hurts")
     ap.add_argument("--momentum", type=float, default=0.95)
+    ap.add_argument("--lr-final", dest="lr_final", type=float, default=1.0,
+                    help="cosine-decay the lr to lr*this by the last step (1.0 = constant, which is "
+                         "what the reference implementation does)")
+    ap.add_argument("--log", default="", help="write step,loss,lr and every eval to a CSV")
     ap.add_argument("--weight-decay", dest="wd", type=float, default=5e-4,
                     help="the reference implementation's value (leeyeehoo/CSRNet-pytorch)")
     ap.add_argument("--count-weight", dest="count_weight", type=float, default=0.0,
@@ -201,7 +205,14 @@ def main():
     best = (1e9, 0)
     run = None
     t0 = time.time()
+    log = open(a.log, "w", buffering=1) if a.log else None
+    if log:
+        log.write("step,loss,lr,test_mae,test_rmse,train_mae" + chr(10))
     for step in range(1, a.steps + 1):
+        if a.lr_final < 1.0:
+            f = a.lr_final + (1.0 - a.lr_final) * 0.5 * (1.0 + math.cos(math.pi * step / a.steps))
+            for gp in opt.param_groups:
+                gp["lr"] = a.lr * f
         idx = [int(rng.integers(0, len(train))) for _ in range(a.batch)]
         xs, ys = zip(*[train.crop(i, a.crop, rng) for i in idx])
         x = torch.from_numpy(np.stack(xs)).to(a.device)
@@ -217,6 +228,8 @@ def main():
         opt.step()
         lv = float(loss)
         run = lv if run is None else 0.9 * run + 0.1 * lv
+        if log:
+            log.write("%d,%.6f,%.3e,,," % (step, lv, opt.param_groups[0]["lr"]) + chr(10))
         if a.dump_loss:
             print("step %d loss %.6f" % (step, lv), flush=True)
         elif step % 25 == 0 or step == 1:
@@ -233,6 +246,9 @@ def main():
                     C.save_onnx(model, a.init or a.export, a.export)
             print("  eval @%d: test MAE %.2f  RMSE %.2f   (train MAE %.2f)%s"
                   % (step, mae, rmse, tr_mae, tag), flush=True)
+            if log:
+                log.write("%d,,%.3e,%.4f,%.4f,%.4f" % (step, opt.param_groups[0]["lr"], mae, rmse,
+                                                       tr_mae) + chr(10))
 
     if not a.dump_loss:
         print("best test MAE %.2f at step %d" % best)
