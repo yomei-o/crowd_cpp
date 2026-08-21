@@ -204,6 +204,11 @@ def main():
                          "instead of count MAE. Use with a decoder graph (--decoder 2|4): the label "
                          "study measured F1 ceilings of 0.737 at 1/8, 0.933 at 1/4 and 0.981 at 1/2.")
     ap.add_argument("--down", type=int, default=8, help="the graph's output stride (decoder 2 -> 4, 4 -> 2)")
+    ap.add_argument("--width", type=float, default=1.0,
+                    help="channel multiplier, matching `crowd init-csrnet --width`. 0.25 is the "
+                         "light variant (1.02M parameters, 4MB) for the browser demo")
+    ap.add_argument("--allow-fresh", dest="allow_fresh", action="store_true",
+                    help="train even if --init does not fit the model (weights start random)")
     ap.add_argument("--loc-thr", dest="loc_thr", type=float, default=8.0)
     ap.add_argument("--peak-thr", dest="peak_thr", type=float, default=0.0,
                     help="0 (the default) uses the reference implementation's LMDS: local maxima "
@@ -253,9 +258,20 @@ def main():
     # weights twice — which is what makes the resume check (tools/parity/resume.py) meaningful
     torch.manual_seed(a.seed)
     # the graph's output stride decides the decoder: --down 8 -> none, 4 -> 1/4, 2 -> 1/2
-    model = C.CSRNet(decoder=8 // max(1, a.down))
+    model = C.CSRNet(width=a.width, decoder=8 // max(1, a.down))
     if a.init:
-        C.load_onnx(model, a.init, verbose=not a.dump_loss)
+        loaded, missing, mismatched = C.load_onnx(model, a.init, verbose=not a.dump_loss)
+        # A mismatch used to be a warning, and that cost 4,000 steps of GPU: `--init` pointed at a
+        # --width 0.25 graph while this file always built a width 1.0 model, so all 38 tensors were
+        # rejected and the run trained a full-width network from scratch — silently, with a plausible
+        # loss curve. If the weights do not fit the model, stop.
+        if (missing or mismatched) and not a.allow_fresh:
+            raise SystemExit(
+                "init %s does not fit this model: %d loaded, %d missing, %d shape mismatch\n"
+                "  first mismatch: %s\n"
+                "  check --width / --down against the graph, or pass --allow-fresh to train anyway"
+                % (a.init, loaded, len(missing), len(mismatched),
+                   (mismatched or missing or ["-"])[0]))
     model.to(a.device).train()
     # The reference implementation (leeyeehoo/CSRNet-pytorch, the paper's first author) uses SGD at a
     # *constant* 1e-7 with momentum 0.95 and weight decay 5e-4, batch 1 on whole images, summed MSE —
