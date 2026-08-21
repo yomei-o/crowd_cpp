@@ -29,7 +29,13 @@ BACK = [512, 512, 512, 256, 128, 64]
 
 
 class CSRNet(nn.Module):
-    def __init__(self, width=1.0):
+    """`decoder` mirrors csr::Spec::decoder in pure/make_csrnet.hpp: 0 (or 1) = no decoder, the
+    CSRNet output at 1/8; 2 = 1/4; 4 = 1/2; 8 = full resolution. Each block is a nearest x2 upsample
+    then a 3x3 conv + ReLU, with max(16, 64 >> d) channels — the same shapes and the same
+    `decoder.<d>` tensor names the C++ builder writes, so one ONNX loads into either side. FIDTM needs
+    it: the label study measured F1 ceilings of 0.737 at 1/8, 0.933 at 1/4 and 0.981 at 1/2."""
+
+    def __init__(self, width=1.0, decoder=0):
         super().__init__()
 
         def ch(c):
@@ -56,6 +62,17 @@ class CSRNet(nn.Module):
             self.back[key] = nn.Conv2d(cin, ch(c), 3, padding=2, dilation=2)
             self.back_order.append((key, "backend.%d" % i))
             cin = ch(c)
+        self.dec = nn.ModuleDict()
+        self.dec_order = []
+        stride, d = 8, 0
+        while decoder > 0 and stride > 8 // max(1, decoder):
+            cout = max(16, ch(64) >> d)
+            self.dec["decoder_%d" % d] = nn.Conv2d(cin, cout, 3, padding=1)
+            self.dec_order.append(("decoder_%d" % d, "decoder.%d" % d))
+            cin = cout
+            stride //= 2
+            d += 1
+        self.out_stride = stride
         self.out = nn.Conv2d(cin, 1, 1)
 
     def forward(self, x):
@@ -65,6 +82,10 @@ class CSRNet(nn.Module):
                 x = torch.max_pool2d(x, 2, 2)
         for key, _onnx in self.back_order:
             x = torch.relu(self.back[key](x))
+        for key, _onnx in self.dec_order:
+            # nearest, matching the integer-factor Resize the C++ graph emits
+            x = torch.nn.functional.interpolate(x, scale_factor=2, mode="nearest")
+            x = torch.relu(self.dec[key](x))
         return self.out(x)                      # no activation: the target is regressed directly
 
     # ---- ONNX <-> torch, by tensor name -------------------------------------------------------
@@ -77,6 +98,9 @@ class CSRNet(nn.Module):
         for key, onnx_name in self.back_order:
             m[onnx_name + ".weight"] = self.back[key].weight
             m[onnx_name + ".bias"] = self.back[key].bias
+        for key, onnx_name in self.dec_order:
+            m[onnx_name + ".weight"] = self.dec[key].weight
+            m[onnx_name + ".bias"] = self.dec[key].bias
         m["output_layer.weight"] = self.out.weight
         m["output_layer.bias"] = self.out.bias
         return m
@@ -120,6 +144,12 @@ def save_onnx(model, src_path, out_path):
     import onnx
     from onnx import numpy_helper
     m = onnx.load(src_path)
+    # mkdir -p, the same rule pure/crowd.cpp's make_parent() follows. Without it an --export into a
+    # directory that does not exist yet (models/ is gitignored, and a fresh Kaggle box has none) dies
+    # at the *first eval*, an hour into the run. Measured on 2026-08-21: it killed both runs.
+    d = os.path.dirname(os.path.abspath(out_path))
+    if d:
+        os.makedirs(d, exist_ok=True)
     want = {k: v.detach().cpu().numpy() for k, v in model.named_onnx().items()}
     n = 0
     for i, init in enumerate(m.graph.initializer):
@@ -138,8 +168,9 @@ def main():
     ap.add_argument("--onnx", default="models/csrnet.onnx")
     ap.add_argument("--imgsz", type=int, default=384)
     ap.add_argument("--width", type=float, default=1.0)
+    ap.add_argument("--decoder", type=int, default=0, help="0 = 1/8 (CSRNet), 2 = 1/4, 4 = 1/2")
     a = ap.parse_args()
-    m = CSRNet(a.width)
+    m = CSRNet(a.width, a.decoder)
     print("CSRNet: %d parameters" % sum(p.numel() for p in m.parameters()))
     if os.path.exists(a.onnx):
         load_onnx(m, a.onnx)

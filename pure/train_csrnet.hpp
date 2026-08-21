@@ -206,7 +206,7 @@ inline Eval evaluate(onx::Trainable& t, const std::vector<Item>& items, const de
 // Localisation: the peaks of the predicted FIDT map against the annotated points, as precision /
 // recall / F1 at a distance threshold in *image* pixels. This is the number FIDTM exists for — a
 // density model's count MAE says nothing about whether the positions are right.
-struct LocEval { double precision = 0, recall = 0, f1 = 0; int tp = 0, fp = 0, fn = 0, n = 0; };
+struct LocEval { double precision = 0, recall = 0, f1 = 0, pmax = 0; int tp = 0, fp = 0, fn = 0, n = 0; };
 
 inline LocEval evaluate_loc(onx::Trainable& t, const std::vector<Item>& items, int out_down,
                             float thr = 8.f, float peak_thr = 0.5f, int limit = 0) {
@@ -229,6 +229,9 @@ inline LocEval evaluate_loc(onx::Trainable& t, const std::vector<Item>& items, i
     m.h = (int)p->shape[2];
     m.w = (int)p->shape[3];
     m.v.assign(p->data.begin(), p->data.begin() + (size_t)m.w * m.h);
+    // reported with F1: FIDT targets peak at 1.0, so F1 0 with a map that tops out at 0.03 means
+    // "nothing reaches the 0.5 peak threshold yet", not "the peaks are in the wrong places"
+    e.pmax += m.max() / (double)n;
     std::vector<std::pair<float, float>> pk = den::peaks(m, peak_thr, 1);
     const float scale = (float)w / (float)std::max(1, m.w);     // map pixels -> image pixels
     for (auto& q : pk) { q.first *= scale; q.second *= scale; }

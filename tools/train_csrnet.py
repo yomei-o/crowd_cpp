@@ -146,10 +146,15 @@ def evaluate_loc(model, ds, device, down, thr=8.0, peak_thr=0.5, limit=0):
     density model's count MAE says nothing about whether the positions are right."""
     model.eval()
     tp = fp = fn = 0
+    pmax = []
     n = len(ds) if limit <= 0 else min(limit, len(ds))
     for i in range(n):
         x, _ = ds.whole(i)
         m = model(torch.from_numpy(x).to(device))[0, 0].cpu().numpy()
+        # the map's peak height, reported alongside F1: FIDT targets are 1.0 at a head, so an F1 of
+        # 0.0000 means something different when the map tops out at 0.03 (nothing is above the 0.5
+        # peak threshold yet) than when it tops out at 0.9 (peaks exist but land in the wrong places)
+        pmax.append(float(m.max()))
         pk = [(px * down, py * down) for px, py in D.peaks(m, peak_thr, 1)]
         r = D.match_points(pk, [tuple(p) for p in ds.pts[i]], thr)
         tp += r["tp"]
@@ -158,7 +163,8 @@ def evaluate_loc(model, ds, device, down, thr=8.0, peak_thr=0.5, limit=0):
     model.train()
     prec = tp / (tp + fp) if tp + fp else 0.0
     rec = tp / (tp + fn) if tp + fn else 0.0
-    return prec, rec, (2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0)
+    return (prec, rec, (2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0),
+            float(np.mean(pmax)) if pmax else 0.0)
 
 
 def main():
@@ -192,6 +198,11 @@ def main():
                          "study measured F1 ceilings of 0.737 at 1/8, 0.933 at 1/4 and 0.981 at 1/2.")
     ap.add_argument("--down", type=int, default=8, help="the graph's output stride (decoder 2 -> 4, 4 -> 2)")
     ap.add_argument("--loc-thr", dest="loc_thr", type=float, default=8.0)
+    ap.add_argument("--peak-thr", dest="peak_thr", type=float, default=0.5,
+                    help="a local maximum counts as a detection above this. FIDTM's default "
+                         "is 0.5, but a map that has not grown to 1.0 yet is limited by it "
+                         "rather than by where its peaks are: at step 2000 the map topped out "
+                         "at 0.446 and recall was 0.001 with precision 1.000")
     ap.add_argument("--adaptive", action="store_true", help="Part A's adaptive sigma (default: fixed 15)")
     ap.add_argument("--sigma", type=float, default=15.0)
     ap.add_argument("--eval-every", dest="eval_every", type=int, default=250)
@@ -200,6 +211,15 @@ def main():
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--dump-loss", dest="dump_loss", action="store_true",
                     help="print only `step N loss X` — what the C++/Python parity test compares")
+    ap.add_argument("--ckpt", default="",
+                    help="write a resumable checkpoint here: weights, the optimiser's moments, both "
+                         "RNG streams, the step count and the best metric so far. A Kaggle session "
+                         "was measured dying after 1h50m-2h45m, so a 20k-step run has to survive one")
+    ap.add_argument("--ckpt-every", dest="ckpt_every", type=int, default=0,
+                    help="steps between checkpoint writes (0 = only at each eval)")
+    ap.add_argument("--resume", default="",
+                    help="continue from a --ckpt file: the next step is the one after the one that "
+                         "was saved, and the lr schedule keeps the run length it was computed from")
     a = ap.parse_args()
 
     if a.crop <= 0 and a.batch != 1:
@@ -211,11 +231,20 @@ def main():
               % (a.data, ("whole images" if a.crop <= 0 else "crop %d" % a.crop), a.batch, a.optim,
                  a.lr, (", count weight %g" % a.count_weight) if a.count_weight > 0 else "",
                  "adaptive" if a.adaptive else "fixed", a.device))
-    train = Set(list_split(a.data, "train"), a.adaptive, sigma=a.sigma, verbose=not a.dump_loss)
-    test = Set(list_split(a.data, "test"), a.adaptive, sigma=a.sigma, verbose=not a.dump_loss) \
-        if a.eval_every else None
+    # --fidt / --down have to reach the label generator, or a decoder graph (output 1/2) gets fed
+    # density labels at 1/8 and the run dies on a shape mismatch at step 1. The C++ side passes its
+    # den::Cfg through; this call was dropping both, which is why the FIDT path had never actually run
+    # here (found 2026-08-21, before the first FIDTM training run).
+    train = Set(list_split(a.data, "train"), a.adaptive, down=a.down, sigma=a.sigma, fidt=a.fidt,
+                verbose=not a.dump_loss)
+    test = Set(list_split(a.data, "test"), a.adaptive, down=a.down, sigma=a.sigma, fidt=a.fidt,
+               verbose=not a.dump_loss) if a.eval_every else None
 
-    model = C.CSRNet()
+    # seeded before the model is built, so that a run *without* --init still starts from the same
+    # weights twice — which is what makes the resume check (tools/parity/resume.py) meaningful
+    torch.manual_seed(a.seed)
+    # the graph's output stride decides the decoder: --down 8 -> none, 4 -> 1/4, 2 -> 1/2
+    model = C.CSRNet(decoder=8 // max(1, a.down))
     if a.init:
         C.load_onnx(model, a.init, verbose=not a.dump_loss)
     model.to(a.device).train()
@@ -227,21 +256,62 @@ def main():
     opt = (torch.optim.SGD(model.parameters(), lr=a.lr, momentum=a.momentum, weight_decay=a.wd)
            if a.optim == "sgd" else torch.optim.Adam(model.parameters(), lr=a.lr))
     rng = np.random.default_rng(a.seed)
-    torch.manual_seed(a.seed)
+
+    # --- resume ---------------------------------------------------------------------------------
+    # What has to be restored for "stop at K of N and resume" to equal an uninterrupted run, in the
+    # order they were found to matter: the weights, the optimiser's moments (resuming from weights
+    # alone restarts Adam's momentum from zero, which shows up as a bump in the loss), both RNG
+    # streams (numpy draws the crops, torch is there for anything stochastic in the model), and the
+    # run length the lr schedule was computed from — stopping a 6-step cosine at 3 and resuming is
+    # *not* the same curve as running 3 then 3 unless the tail knows it is a 6-step run.
+    best = (1e9, 0)
+    start = 1
+    sched_total = a.steps
+    if a.resume:
+        ck = torch.load(a.resume, map_location=a.device, weights_only=False)
+        model.load_state_dict(ck["model"])
+        opt.load_state_dict(ck["opt"])
+        rng.bit_generator.state = ck["np_rng"]
+        torch.set_rng_state(ck["torch_rng"].to("cpu", torch.uint8))
+        start = int(ck["step"]) + 1
+        sched_total = int(ck["total"])
+        best = (float(ck["best"]), int(ck["best_step"]))
+        if not a.dump_loss:
+            print("resume %s: step %d done, continuing at %d of %d (best %.4f at %d)"
+                  % (a.resume, ck["step"], start, sched_total, best[0], best[1]), flush=True)
+            if a.steps != sched_total:
+                print("  note: --steps %d differs from the checkpoint's %d; keeping the schedule of "
+                      "%d and stopping at %d" % (a.steps, sched_total, sched_total, a.steps),
+                      flush=True)
+
+    def save_ckpt(step, best):
+        """Write the checkpoint via a temp file: a session that dies mid-write must not also take the
+        previous checkpoint with it."""
+        if not a.ckpt:
+            return
+        d = os.path.dirname(os.path.abspath(a.ckpt))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        torch.save({"step": step, "total": sched_total, "model": model.state_dict(),
+                    "opt": opt.state_dict(), "np_rng": rng.bit_generator.state,
+                    "torch_rng": torch.get_rng_state(), "best": best[0], "best_step": best[1],
+                    "args": vars(a)}, a.ckpt + ".tmp")
+        os.replace(a.ckpt + ".tmp", a.ckpt)
 
     if test is not None and not a.dump_loss and not a.fidt:
         mae, rmse = evaluate(model, test, a.device, a.eval_limit)
-        print("step 0: test MAE %.2f  RMSE %.2f  (before training)" % (mae, rmse), flush=True)
+        print("step %d: test MAE %.2f  RMSE %.2f  (%s)"
+              % (start - 1, mae, rmse, "resumed" if a.resume else "before training"), flush=True)
 
-    best = (1e9, 0)
     run = None
     t0 = time.time()
-    log = open(a.log, "w", buffering=1) if a.log else None
-    if log:
+    # append on resume, so the curve of a run that was interrupted is not thrown away
+    log = open(a.log, "a" if a.resume else "w", buffering=1) if a.log else None
+    if log and not a.resume:
         log.write("step,loss,lr,test_mae,test_rmse,train_mae" + chr(10))
-    for step in range(1, a.steps + 1):
+    for step in range(start, a.steps + 1):
         if a.lr_final < 1.0:
-            f = a.lr_final + (1.0 - a.lr_final) * 0.5 * (1.0 + math.cos(math.pi * step / a.steps))
+            f = a.lr_final + (1.0 - a.lr_final) * 0.5 * (1.0 + math.cos(math.pi * step / sched_total))
             for gp in opt.param_groups:
                 gp["lr"] = a.lr * f
         idx = [int(rng.integers(0, len(train))) for _ in range(a.batch)]
@@ -267,15 +337,16 @@ def main():
             print("  step %5d/%d  loss %10.3f  %5.1fs" % (step, a.steps, run, time.time() - t0),
                   flush=True)
         if test is not None and a.eval_every and step % a.eval_every == 0 and not a.dump_loss and a.fidt:
-            pr, rc, f1 = evaluate_loc(model, test, a.device, a.down, a.loc_thr, limit=a.eval_limit)
+            pr, rc, f1, pmax = evaluate_loc(model, test, a.device, a.down, a.loc_thr,
+                                            peak_thr=a.peak_thr, limit=a.eval_limit)
             tag = ""
             if -f1 < best[0]:
                 best = (-f1, step)
                 tag = "  <- best"
                 if a.export:
                     C.save_onnx(model, a.init or a.export, a.export)
-            print("  eval @%d: F1 %.4f  (precision %.4f  recall %.4f)%s" % (step, f1, pr, rc, tag),
-                  flush=True)
+            print("  eval @%d: F1 %.4f  (precision %.4f  recall %.4f, map max %.3f)%s"
+                  % (step, f1, pr, rc, pmax, tag), flush=True)
             if log:
                 log.write("%d,,%.3e,%.4f,%.4f,%.4f" % (step, opt.param_groups[0]["lr"], f1, pr, rc)
                           + chr(10))
@@ -293,7 +364,13 @@ def main():
             if log:
                 log.write("%d,,%.3e,%.4f,%.4f,%.4f" % (step, opt.param_groups[0]["lr"], mae, rmse,
                                                        tr_mae) + chr(10))
+        # After the eval, so the checkpoint carries the best-so-far the exported model belongs to.
+        if a.ckpt and ((a.ckpt_every and step % a.ckpt_every == 0)
+                       or (a.eval_every and step % a.eval_every == 0)):
+            save_ckpt(step, best)
 
+    if a.ckpt and a.steps >= start:
+        save_ckpt(a.steps, best)
     if not a.dump_loss:
         if a.fidt:
             print("best F1 %.4f at step %d" % (-best[0], best[1]))

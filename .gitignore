@@ -7,6 +7,7 @@ scratch/*
 !scratch/kb.py
 !scratch/kb_job.py
 !scratch/wait_job.py
+!scratch/pull.py
 # 生成した ONNX は入れない。CSRNet は 16.3M パラメータ = 1 個 62MB で、
 # `crowd init-csrnet` の 1 コマンドで作り直せる。学習済みの軽量版だけ後で例外にする。
 models/*.onnx

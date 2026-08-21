@@ -118,11 +118,15 @@ struct Ckpt {
 struct Log {
   FILE* f = nullptr;
   Log() = default;
-  Log(const std::string& path, const std::string& header) { open(path, header); }
-  void open(const std::string& path, const std::string& header) {
+  Log(const std::string& path, const std::string& header, bool append = false) {
+    open(path, header, append);
+  }
+  // `append` is for a resumed run: the rows already written are the first half of the same curve, so
+  // truncating would throw away exactly the part the interruption made expensive to get.
+  void open(const std::string& path, const std::string& header, bool append = false) {
     if (path.empty()) return;
-    f = fopen(path.c_str(), "wb");
-    if (f) { fputs(header.c_str(), f); fputc('\n', f); fflush(f); }
+    f = fopen(path.c_str(), append ? "ab" : "wb");
+    if (f && !append) { fputs(header.c_str(), f); fputc('\n', f); fflush(f); }
   }
   // Flushed per row on purpose: a run that dies should still leave the curve up to the last step.
   void row(const char* fmt, ...) {

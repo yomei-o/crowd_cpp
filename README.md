@@ -39,12 +39,21 @@ sh build/gcc.sh pure/gradcheck.cpp -o gradcheck.exe && ./gradcheck.exe   # dilat
 ./crowd.exe train --data <ShanghaiTech>/part_B --init models/csrnet.onnx --steps 1000 \
     --eval-every 200 --export models/out.onnx
 
+# 長い学習は中断される前提で回す（Kaggle のセッションは実測 2 時間前後で落ちる）
+./crowd.exe train ... --log run.csv --ckpt run.ck --ckpt-every 500   # 途中経過と再開点を残す
+./crowd.exe train ... --log run.csv --resume run.ck                  # 落ちた続きから
+
+# 評価（学習を回さずに測る。--sweep でピーク閾値を振って F1 と振幅を出す）
+./crowd.exe eval --data <ShanghaiTech>/part_B --model models/out.onnx           # 密度: MAE/RMSE
+./crowd.exe eval --data <ShanghaiTech>/part_B --model models/fidt_B.onnx --fidt --down 2 --sweep
+
 # 推論（自作ランタイム。任意サイズを受ける）
 ./crowd.exe infer --img <画像> --model models/csrnet.onnx
 ```
 
-Python 側は `tools/csrnet.py`（ONNX を名前で読み書きする torch 実装）と
-`tools/train_csrnet.py`（学習・評価）。`--fidt` で FIDT 目標と F1 評価に切り替わる。
+Python 側は `tools/csrnet.py`（ONNX を名前で読み書きする torch 実装。`--decoder 2|4` の
+デコーダも同じテンソル名で持つ）、`tools/train_csrnet.py`（学習）、`tools/eval.py`（評価。
+`crowd eval` と**出力が一字一句同じ**）。`--fidt` で FIDT 目標と F1 評価に切り替わる。
 
 ## 検証済みの数字
 
@@ -58,6 +67,9 @@ Python 側は `tools/csrnet.py`（ONNX を名前で読み書きする torch 実�
 | dilated conv 6 本通過後（自作 ⇔ ORT） | count -2028.06 / -2028.0618 |
 | ラベル生成 C++ ⇔ Python | 3 種すべて相対 **5e-06 以下**、密度の合計は点数と 2e-06、FIDT のピーク 907/907 |
 | **学習 C++ ⇔ Python（同じバッチ）** | loss **完全一致 3.453135**、勾配 34 テンソルの最悪 **2.57e-05** |
+| **`--resume`（両実装）** | 途中で kill して再開すると、以降の loss が無停止運転と**印字桁まで一致**（`tools/parity/resume.py` が py / cpp 両方で PASS） |
+| デコーダ付きグラフ（1/2 出力）torch ⇔ ORT | 38 テンソル全部が名前と形で一致、出力は**相対 4.3e-07** |
+| `crowd eval` ⇔ `tools/eval.py` | 同じモデル・同じ画像で**出力がバイト単位で一致**（閾値スイープ 7 段と頭位置での振幅比まで） |
 | ラベル表現の天井（位置） | 1/8 で F1 0.737、1/4 で 0.933、**1/2 で 0.981**（precision はどれも 1.000） |
 | CSRNet の精度（Part B） | 8000 step で MAE **43.6**（まだ下降中、セッション落ちで中断）。**論文は 10.6** — 差は予算（[RESUME](RESUME.md) に切り分け） |
 
