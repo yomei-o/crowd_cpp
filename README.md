@@ -55,6 +55,19 @@ Python 側は `tools/csrnet.py`（ONNX を名前で読み書きする torch 実�
 デコーダも同じテンソル名で持つ）、`tools/train_csrnet.py`（学習）、`tools/eval.py`（評価。
 `crowd eval` と**出力が一字一句同じ**）。`--fidt` で FIDT 目標と F1 評価に切り替わる。
 
+## ブラウザで動かす（WASM）
+
+```sh
+sh build/emcc.sh wasm/crowd_wasm.cpp -o wasm/crowd.js
+node wasm/test_node.js                       # 実画像で onnxruntime と数値が一致するか
+python -m http.server -d . 8000              # http://127.0.0.1:8000/wasm/
+```
+
+推論ライブラリは使わず、`pure/onnx_run.hpp` をそのまま emcc でビルドしている。画像かカメラ 1 枚を
+入れると、頭の位置（青丸）とヒートマップと人数が出る。通常版は **512x384 で 1 枚 25 秒**、
+1024x768 は wasm32 の 2GB 上限に当たって動かない（中間テンソルを全部保持する実装のため）。
+詳細と直し方は [RESUME.md](RESUME.md) の「WASM デモ」。
+
 ## 学習済みの重み
 
 `models/fidt_partB.onnx`（62MB）を 1 本だけリポジトリに入れてある。FIDTM の位置推定を

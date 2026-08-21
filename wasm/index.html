@@ -1,0 +1,179 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>crowd_cpp — FIDTM in the browser</title>
+<!--
+  The same graph and the same rules as the CLI: pure/onnx_run.hpp compiled to wasm, ImageNet
+  normalisation, and the reference implementation's LMDS (a peak must clear 100/255 of the map's own
+  maximum). No inference library — the interpreter is ours.
+
+  Serve this over HTTP (the model is fetched):  python -m http.server -d . 8000
+  then open  http://127.0.0.1:8000/wasm/
+-->
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 16px 20px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { opacity: .7; margin-bottom: 14px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .stage { position: relative; display: inline-block; max-width: 100%; }
+  canvas { max-width: 100%; height: auto; display: block; border-radius: 6px; }
+  #dots { position: absolute; left: 0; top: 0; pointer-events: none; }
+  #status { font-variant-numeric: tabular-nums; }
+  .num { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .note { opacity: .7; font-size: 13px; max-width: 70ch; }
+  button, select, label { font: inherit; }
+  button { padding: 5px 12px; border-radius: 6px; }
+</style>
+
+<h1>crowd_cpp — 群衆の頭を数えて位置を出す（WASM）</h1>
+<div class="sub">FIDTM / ShanghaiTech Part B。推論エンジンも自前（<code>pure/onnx_run.hpp</code> を emcc でビルド）。</div>
+
+<div class="row">
+  <label>モデル
+    <select id="model">
+      <option value="../models/fidt_light_B.onnx">軽量版 4MB（fidt_light_B）</option>
+      <option value="../models/fidt_partB.onnx">通常版 62MB（fidt_partB, F1 0.797）</option>
+    </select>
+  </label>
+  <label>入力の長辺 <select id="size">
+    <option value="384">384</option>
+    <option value="512" selected>512</option>
+    <option value="640">640</option>
+  </select></label>
+  <button id="load">モデルを読む</button>
+</div>
+
+<div class="row">
+  <input type="file" id="file" accept="image/*" disabled>
+  <button id="cam" disabled>カメラ</button>
+  <button id="shot" disabled>1 枚撮って測る</button>
+  <label><input type="checkbox" id="heaton" checked> ヒートマップ</label>
+</div>
+
+<div class="row"><span class="num" id="count">—</span><span id="status">モデルを読んでください</span></div>
+
+<div class="stage">
+  <canvas id="view"></canvas>
+  <canvas id="dots"></canvas>
+</div>
+<video id="video" playsinline muted style="display:none"></video>
+
+<p class="note" id="foot">
+  頭の位置は、出力マップ（入力の 1/2 解像度）の局所最大のうち
+  <b>マップ自身の最大値の 100/255 倍</b>以上のものです。絶対値 0.5 で切ると、同じ重みでもほとんど
+  検出できなくなります（実測 F1 0.005）。通常版は 512x384 で 1 枚あたり 20 秒ほどかかり、
+  1024x768 は wasm32 の 2GB 上限に当たって動きません（中間テンソルを全部保持する実装なので）。
+</p>
+
+<script>
+const stamp = Date.now();                       // キャッシュ避け（stale な .wasm を掴むと原因が分からなくなる）
+const $ = (id) => document.getElementById(id);
+const view = $('view'), dots = $('dots');
+const vctx = view.getContext('2d'), dctx = dots.getContext('2d');
+let worker = null, busy = false, lastImage = null;
+
+function setStatus(t) { $('status').textContent = t; }
+
+async function pickDefaultModel() {
+  // 軽量版がまだ無いリポジトリでも動くように、あるものを選ぶ
+  for (const opt of $('model').options) {
+    try {
+      const r = await fetch(opt.value + '?v=' + stamp, {method: 'HEAD'});
+      if (r.ok) { $('model').value = opt.value; return; }
+    } catch (e) { /* 次の候補へ */ }
+  }
+}
+
+$('load').onclick = () => {
+  if (!worker) {
+    worker = new Worker('worker.js?v=' + stamp);
+    worker.onmessage = (ev) => {
+      const m = ev.data;
+      if (m.type === 'loaded') {
+        setStatus('モデル読み込み完了（' + m.nodes + ' ノード, ' + (m.bytes / 1e6).toFixed(1) + ' MB）');
+        $('file').disabled = false; $('cam').disabled = false;
+        return;
+      }
+      if (m.type === 'result') { draw(m); busy = false; return; }
+      if (m.type === 'error') { setStatus('エラー: ' + m.message); busy = false; }
+    };
+  }
+  setStatus('モデルを読んでいます…（通常版は 62MB あります）');
+  worker.postMessage({type: 'load', url: $('model').value, stamp});
+};
+
+function fitToCanvas(src, srcW, srcH) {
+  const long = Number($('size').value);
+  const scale = Math.min(1, long / Math.max(srcW, srcH));
+  // 出力ストライドは 2 なので偶数に丸める
+  const w = Math.max(2, Math.round(srcW * scale / 2) * 2);
+  const h = Math.max(2, Math.round(srcH * scale / 2) * 2);
+  view.width = dots.width = w; view.height = dots.height = h;
+  vctx.drawImage(src, 0, 0, w, h);
+  return {w, h};
+}
+
+function run() {
+  if (!worker || busy || !lastImage) return;
+  busy = true;
+  const {w, h} = fitToCanvas(lastImage.src, lastImage.w, lastImage.h);
+  const rgba = vctx.getImageData(0, 0, w, h).data;
+  setStatus(w + 'x' + h + ' を計算中…');
+  dctx.clearRect(0, 0, w, h);
+  worker.postMessage({type: 'run', rgba, w, h, down: 2, rel: 0}, [rgba.buffer]);
+}
+
+function draw(m) {
+  $('count').textContent = m.count + ' 人';
+  setStatus('マップ ' + m.map_w + 'x' + m.map_h + '、最大 ' + m.map_max.toFixed(3) +
+            '、' + (m.ms / 1000).toFixed(1) + ' 秒');
+  if ($('heaton').checked) {
+    // 赤くするだけの単純な重ね描き。閾値ではなく値そのものを見せる
+    const heat = m.heat, hw = m.map_w, hh = m.map_h;
+    const img = vctx.createImageData(hw, hh);
+    const mx = Math.max(1e-6, m.map_max);
+    for (let i = 0; i < hw * hh; i++) {
+      const v = Math.max(0, heat[i]) / mx;
+      img.data[i * 4] = 255; img.data[i * 4 + 1] = 40; img.data[i * 4 + 2] = 40;
+      img.data[i * 4 + 3] = Math.min(200, v * v * 255);
+    }
+    const tmp = new OffscreenCanvas(hw, hh);
+    tmp.getContext('2d').putImageData(img, 0, 0);
+    vctx.drawImage(tmp, 0, 0, view.width, view.height);
+  }
+  dctx.clearRect(0, 0, dots.width, dots.height);
+  dctx.strokeStyle = '#00e5ff';
+  dctx.lineWidth = 1.5;
+  for (const [x, y] of m.points) {
+    dctx.beginPath(); dctx.arc(x, y, 4, 0, 6.284); dctx.stroke();
+  }
+}
+
+$('file').onchange = (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => { lastImage = {src: img, w: img.naturalWidth, h: img.naturalHeight}; run(); };
+  img.src = URL.createObjectURL(f);
+};
+
+$('cam').onclick = async () => {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({video: {width: 1280, height: 720}});
+    $('video').srcObject = s;
+    await $('video').play();
+    $('shot').disabled = false;
+    setStatus('カメラ待機中。「1 枚撮って測る」で 1 フレーム処理します（連続再生は 1 枚 20 秒なので無効）');
+  } catch (e) { setStatus('カメラを開けません: ' + e.message); }
+};
+
+$('shot').onclick = () => {
+  const v = $('video');
+  if (!v.videoWidth) return;
+  lastImage = {src: v, w: v.videoWidth, h: v.videoHeight};
+  run();
+};
+
+$('heaton').onchange = () => { if (lastImage && !busy) run(); };
+pickDefaultModel();
+</script>

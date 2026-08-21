@@ -548,6 +548,29 @@ static int cmd_eval(int argc, char** argv) {
   return 0;
 }
 
+// crowd rgba — dump an image as raw RGBA, which is what the browser hands the WASM module. The
+// point is that wasm/test_node.js can push *the same pixels* the CLI sees, so a difference between
+// the two is the build's fault and not the decoder's.
+static int cmd_rgba(int argc, char** argv) {
+  const std::string img = arg_of(argc, argv, "--img", "");
+  const std::string out = arg_of(argc, argv, "--out", "");
+  if (img.empty() || out.empty()) {
+    printf("usage: crowd rgba --img <file> --out <file.rgba>\n");
+    return 1;
+  }
+  int w = 0, h = 0, ch = 0;
+  unsigned char* px = stbi_load(img.c_str(), &w, &h, &ch, 4);
+  if (!px) { printf("cannot read %s\n", img.c_str()); return 1; }
+  make_parent(out);
+  FILE* f = fopen(out.c_str(), "wb");
+  if (!f) { stbi_image_free(px); printf("cannot write %s\n", out.c_str()); return 1; }
+  fwrite(px, 1, (size_t)w * h * 4, f);
+  fclose(f);
+  printf("wrote %s (%dx%d RGBA, %zu bytes)\n", out.c_str(), w, h, (size_t)w * h * 4);
+  stbi_image_free(px);
+  return 0;
+}
+
 // crowd infer — run a density model on one image and print the count.
 static int cmd_infer(int argc, char** argv) {
   const std::string img = arg_of(argc, argv, "--img", "");
@@ -596,7 +619,7 @@ int main(int argc, char** argv) {
   SetConsoleOutputCP(CP_UTF8);
 #endif
   if (argc < 2) {
-    printf("usage: crowd <init-csrnet|labels|train|eval|infer> ...\n");
+    printf("usage: crowd <init-csrnet|labels|train|eval|infer|rgba> ...\n");
     return 1;
   }
   const std::string cmd = argv[1];
@@ -604,6 +627,7 @@ int main(int argc, char** argv) {
   if (cmd == "labels") return cmd_labels(argc, argv);
   if (cmd == "train") return cmd_train(argc, argv);
   if (cmd == "eval") return cmd_eval(argc, argv);
+  if (cmd == "rgba") return cmd_rgba(argc, argv);
   if (cmd == "infer") return cmd_infer(argc, argv);
   printf("crowd: '%s' is not implemented yet\n", cmd.c_str());
   return 1;
