@@ -55,6 +55,14 @@ Python 側は `tools/csrnet.py`（ONNX を名前で読み書きする torch 実�
 デコーダも同じテンソル名で持つ）、`tools/train_csrnet.py`（学習）、`tools/eval.py`（評価。
 `crowd eval` と**出力が一字一句同じ**）。`--fidt` で FIDT 目標と F1 評価に切り替わる。
 
+## 学習済みの重み
+
+`models/fidt_partB.onnx`（62MB）を 1 本だけリポジトリに入れてある。FIDTM の位置推定を
+ShanghaiTech Part B で学習したもの（**test 316 枚で F1 0.7971 / 8px**）。入力の正規化・出力の
+読み方・極大の取り方（**閾値は絶対値ではなくマップ最大値の 100/255 倍**）は
+[models/README.md](models/README.md) に書いてある。ブラウザに 62MB は重いので、
+軽量版（M8、`--width 0.25`）ができたら差し替える。
+
 ## 検証済みの数字
 
 | 検証 | 結果 |

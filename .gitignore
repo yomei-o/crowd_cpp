@@ -11,6 +11,11 @@ scratch/*
 # 生成した ONNX は入れない。CSRNet は 16.3M パラメータ = 1 個 62MB で、
 # `crowd init-csrnet` の 1 コマンドで作り直せる。学習済みの軽量版だけ後で例外にする。
 models/*.onnx
+# 例外: 学習済みでそのまま使える重みだけ入れる（中身は models/README.md）。
+# fidt_partB.onnx は 62MB あり GitHub が 50MB 超で警告を出す。M8 の軽量版（--width 0.25、
+# 4MB 前後）ができたらそちらに差し替えて、これは Release に移すのが本来の形。
+!models/fidt_partB.onnx
+!models/README.md
 *.exe
 *.obj
 *.o
