@@ -12,7 +12,8 @@
 
 | 見たこと | 数字 |
 |---|---|
-| CSRNet 20000 step 完走（cosine 2e-6→4e-8） | **best test MAE 31.36**（step 18000。論文 10.6、予算は参考実装の 1/24） |
+| CSRNet 20000 step 完走（cosine 2e-6→4e-8） | **test MAE 33.10 / RMSE 45.21**（test 316 枚全部。学習中の eval は 120 枚で 31.36）。論文 10.6、予算は参考実装の 1/24 |
+| **M6 の締め: 自作 C++ ランタイムで同じ MAE が出るか** | 20 枚で C++ **41.25** / torch **41.32**（RMSE 54.14 / 54.12）。差 0.17% ＝ **M6 完了** |
 | FIDTM 8000 step（lr 3e-5→cosine） | **参考 LMDS で F1 0.7429**（precision 0.845 / recall 0.663、天井 0.981） |
 | `crowd eval` ⇔ `tools/eval.py`（学習済み FIDT、実データ 6 枚） | 閾値スイープの F1 が 0.004 以内、振幅比は 0.444 で完全一致 |
 | `--resume`（両実装） | kill → 再開で以降の loss が印字桁まで一致 |
@@ -52,7 +53,10 @@
    （これを持たないと、6 step の cosine を 3 で止めて再開したものは 3+3 と別の曲線になる）。
    `tools/parity/resume.py` が合成データで py / cpp 両方を縛る（**実際に kill して再開**し、
    以降の loss が無停止運転と印字桁まで一致するか。CSV も追記されて 1 本の曲線になるか）。
-2. **20000 step の学習をやり直す** — **2026-08-21 に投入済み、実行中**（下の「学習の記録」）。
+2. ~~**20000 step の学習をやり直す**~~ → **完了（2026-08-21）**。best test MAE 31.36（120 枚）/
+   **33.10（316 枚全部）**、自作 C++ ランタイムでも一致（20 枚で 41.25 対 41.32）＝ **M6 完了**。
+   途中でセッションの 502 に 2 回当たったが、`--resume` と puller で 1 step も失わずに済んだ。
+   使ったコマンド:
    ```sh
    python tools/train_csrnet.py --data /kaggle/working/sht/ShanghaiTech/part_B \
        --init models/csrnet_vgg.onnx --steps 20000 --lr 2e-6 --lr-final 0.02 \
@@ -63,8 +67,11 @@
    `python scratch/pull.py --fast run_cos.csv --slow models/csrnet_B_cos.onnx ck/cos.ck` を
    並走させて、書かれた時点で引き取る。完走したら**自作 C++ ランタイムでも同じ MAE が出るか**を
    確認する（**ここまでやれば M6 完了**）。
-3. **FIDTM の学習（M7）** — **2026-08-21 に投入済み、実行中**。python 側は 2 つ直してから動いた
-   （落とし穴の表）。0.28 秒/step で、CSRNet の丸ごと1枚（0.45 秒/step）より軽い。
+3. **FIDTM の学習（M7）** — 初回は完了、いまは設定を参考実装に寄せている最中。
+   参考 LMDS で **F1 0.7429**（天井 0.981）。python 側は 3 つ直してから動いた（落とし穴の表）。
+   0.28 秒/step（batch 8）で、CSRNet の丸ごと1枚（0.45 秒/step）より軽い。
+   **残り: 参考設定（lr 1e-4 / batch 16 / wd 5e-4）で 8000 step 以上回し、
+   0.7429 をどこまで超えるか。それでも足りなければ I-SSIM（論文のアブレーション）。**
    ```sh
    ./crowd init-csrnet --out models/fidt.onnx --decoder 4 --from-pt vgg16_front.pth   # 1/2 出力
    python tools/train_csrnet.py --data <part>/part_B --init models/fidt.onnx --fidt --down 2 \
@@ -89,7 +96,7 @@
 - [x] **M3 VGG-16 転移の検証** — `--from-pt` で前段 20 テンソル、torchvision と相対 7.9e-07。
 - [x] **M4 データとラベル** — `.mat` リーダ（zlib 対応）、密度（固定σ/適応σ）と FIDT、両言語パリティ。
 - [x] **M5 学習（両言語）** — `crowd train` と `tools/train_csrnet.py`、同じバッチで loss 完全一致。
-- [~] **M6 評価** — 丸ごと1枚の MAE/RMSE は両言語にある。**論文値との比較が残り**（実行中）。
+- [x] **M6 評価** — 丸ごと1枚の MAE/RMSE を両言語で。20000 step まで学習して **test MAE 33.10**（316 枚）、自作 C++ ランタイムでも同じ値が出ることを確認（20 枚で 41.25 対 41.32）。論文の 10.6 に届かない理由は予算（下の切り分け）。
 - [~] **M7 FIDTM** — ラベル・デコーダ（`--decoder 2|4`）・極大検出・F1 指標・両言語の学習・
       **初回の学習と F1 の測定**まで完了（**F1 0.719** / 天井 0.981）。残りは振幅を上げること
       （I-SSIM）。python 側は 2026-08-21 に 3 つ直してから初めて動いた（デコーダ、ラベルのフラグ、
@@ -360,6 +367,9 @@ torch.save(sd, 'vgg16_front.pth')"
 | Python / torch / **T4** | 768x1024 丸ごと1枚 | **0.46 秒** | 0.46 秒 |
 | C++ / 自作エンジン / CPU 4 コア | 512x384 丸ごと1枚 | 126 秒 | 約 500 秒 |
 | C++ / **`-DUSE_EIGEN`** / CPU 4 コア | 512x384 丸ごと1枚 | **11.75 秒** | 約 47 秒 |
+
+評価（forward のみ、768x1024 丸ごと1枚）は `-DUSE_EIGEN` の C++ で **41 秒/枚**（20 枚で 13 分 38 秒）。GPU の torch なら 20 枚が数秒なので、**評価も本番は GPU 側**で回し、
+C++ は「同じ数字が出ること」の確認に使う。
 
 いずれも「1 step の実行」と「4 step の実行」の差分から 3 step 分を出した値（起動と ONNX 読み込みと
 ラベル生成を除ける）。
