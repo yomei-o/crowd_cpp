@@ -72,6 +72,10 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--down", type=int, default=8)
+    ap.add_argument("--width", type=float, default=1.0,
+                    help="channel multiplier of the model being scored, matching "
+                         "`crowd init-csrnet --width`. The C++ side reads it from the graph; "
+                         "this side builds the architecture by hand, so it has to be told")
     ap.add_argument("--sigma", type=float, default=15.0)
     ap.add_argument("--adaptive", action="store_true")
     ap.add_argument("--fidt", action="store_true")
@@ -95,8 +99,17 @@ def main():
         print("labels (down %d) on %d %s images of %s" % (a.down, len(items), a.split, a.data))
         preds = [lab for _f, _x, _pts, lab, _w, _h in items]
     else:
-        model = C.CSRNet(1.0, 8 // max(1, a.down))
-        C.load_onnx(model, a.model, verbose=False)
+        model = C.CSRNet(a.width, 8 // max(1, a.down))
+        loaded, missing, mismatched = C.load_onnx(model, a.model, verbose=False)
+        # Scoring a model whose weights did not fit would report numbers for random weights, which
+        # look like a bad model rather than a wrong command line. Measured the hard way today.
+        if missing or mismatched:
+            raise SystemExit(
+                "%s does not fit this model: %d loaded, %d missing, %d shape mismatch\n"
+                "  first mismatch: %s\n"
+                "  check --width / --down against the graph"
+                % (a.model, loaded, len(missing), len(mismatched),
+                   (mismatched or missing or ["-"])[0]))
         model.to(a.device).eval()
         print("%s on %d %s images of %s" % (a.model, len(items), a.split, a.data))
         preds = []
