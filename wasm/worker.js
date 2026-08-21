@@ -16,7 +16,9 @@ self.onmessage = async (ev) => {
         importScripts('crowd.js?v=' + msg.stamp);
         M = await createCrowd();
       }
-      const r = await fetch(msg.url + '?v=' + msg.stamp);
+      // no cache-buster on the model: it is 62 MB and every reload would fetch it again.
+      // The code above *is* cache-busted, because a stale crowd.wasm is a confusing failure.
+      const r = await fetch(msg.url);
       if (!r.ok) throw new Error('fetch ' + msg.url + ': HTTP ' + r.status);
       const bytes = new Uint8Array(await r.arrayBuffer());
       const p = M._malloc(bytes.length);

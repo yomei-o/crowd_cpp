@@ -7,6 +7,9 @@
 
 進捗・実測値・落とし穴・次の一手は **[RESUME.md](RESUME.md)** に集約してある。
 
+**ブラウザで試す → https://yomei-o.github.io/crowd_cpp/wasm/**
+（画像かカメラ 1 枚で頭の位置と人数が出る。推論も自前エンジンを wasm にしたもの。初回はモデル 62MB を読むので待つ。詳細は下の「ブラウザで動かす」）
+
 ## なぜこの順番か（手法の比較）
 
 「人の位置がわかる群衆検知」の最良は P2PNet 系だが、**FIDTM は CSRNet と出力の形が同じ**（1 チャンネル
@@ -56,6 +59,8 @@ Python 側は `tools/csrnet.py`（ONNX を名前で読み書きする torch 実�
 `crowd eval` と**出力が一字一句同じ**）。`--fidt` で FIDT 目標と F1 評価に切り替わる。
 
 ## ブラウザで動かす（WASM）
+
+**公開デモ: https://yomei-o.github.io/crowd_cpp/wasm/** （初回はモデル 62MB を読みます）
 
 ```sh
 sh build/emcc.sh wasm/crowd_wasm.cpp -o wasm/crowd.js

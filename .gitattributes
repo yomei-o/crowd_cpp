@@ -1,0 +1,10 @@
+# このリポジトリはバイナリ（学習済み ONNX と wasm）を commit するので、
+# git が改行変換をしないように明示しておく。ONNX に 
+ 変換が入ったら静かに壊れる。
+*.onnx binary
+*.wasm binary
+*.rgba binary
+*.pth binary
+*.pt binary
+# emcc が吐く JS も生成物なので触らせない
+wasm/crowd.js -text

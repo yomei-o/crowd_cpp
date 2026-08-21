@@ -66,7 +66,9 @@
 </p>
 
 <script>
-const stamp = Date.now();                       // キャッシュ避け（stale な .wasm を掴むと原因が分からなくなる）
+// キャッシュ避けは**コードだけ**に付ける（stale な .wasm を掴むと原因が分からなくなる）。
+// モデルには付けない: 62MB をリロードごとに再取得させてしまう。
+const stamp = Date.now();
 const $ = (id) => document.getElementById(id);
 const view = $('view'), dots = $('dots');
 const vctx = view.getContext('2d'), dctx = dots.getContext('2d');
@@ -78,7 +80,7 @@ async function pickDefaultModel() {
   // 軽量版がまだ無いリポジトリでも動くように、あるものを選ぶ
   for (const opt of $('model').options) {
     try {
-      const r = await fetch(opt.value + '?v=' + stamp, {method: 'HEAD'});
+      const r = await fetch(opt.value, {method: 'HEAD'});
       if (r.ok) { $('model').value = opt.value; return; }
     } catch (e) { /* 次の候補へ */ }
   }
