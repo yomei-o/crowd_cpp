@@ -68,7 +68,7 @@ def load_split(part_dir, split, down, sigma, adaptive, fidt, limit):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
-    ap.add_argument("--model", required=True)
+    ap.add_argument("--model", default="", help="not needed with --labels")
     ap.add_argument("--split", default="test")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--down", type=int, default=8)
@@ -80,21 +80,29 @@ def main():
                     help="0 = the reference's LMDS (100/255 of each map's own maximum); "
                          "a positive value forces an absolute threshold")
     ap.add_argument("--sweep", action="store_true")
+    ap.add_argument("--labels", action="store_true",
+                    help="score the *label* maps instead of a model — the ceiling any model at this "
+                         "output stride can reach. The gap between this and a trained model is what "
+                         "training can still win; the gap between this and 1.0 is what the stride "
+                         "costs (RESUME: 0.737 at 1/8, 0.933 at 1/4, 0.981 at 1/2, all at 8 px)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
 
-    model = C.CSRNet(1.0, 8 // max(1, a.down))
-    C.load_onnx(model, a.model, verbose=False)
-    model.to(a.device).eval()
     items = load_split(a.data, a.split, a.down, a.sigma, a.adaptive, a.fidt, a.limit)
     if not items:
         raise SystemExit("no %s images under %s" % (a.split, a.data))
-    print("%s on %d %s images of %s" % (a.model, len(items), a.split, a.data))
-
-    preds = []
-    with torch.no_grad():
-        for _f, x, _pts, _lab, _w, _h in items:
-            preds.append(model(torch.from_numpy(x).to(a.device))[0, 0].cpu().numpy())
+    if a.labels:
+        print("labels (down %d) on %d %s images of %s" % (a.down, len(items), a.split, a.data))
+        preds = [lab for _f, _x, _pts, lab, _w, _h in items]
+    else:
+        model = C.CSRNet(1.0, 8 // max(1, a.down))
+        C.load_onnx(model, a.model, verbose=False)
+        model.to(a.device).eval()
+        print("%s on %d %s images of %s" % (a.model, len(items), a.split, a.data))
+        preds = []
+        with torch.no_grad():
+            for _f, x, _pts, _lab, _w, _h in items:
+                preds.append(model(torch.from_numpy(x).to(a.device))[0, 0].cpu().numpy())
 
     if not a.fidt:
         err = np.array([p.sum() - len(pts) for p, (_f, _x, pts, _l, _w, _h) in zip(preds, items)],

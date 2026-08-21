@@ -412,6 +412,10 @@ static int cmd_eval(int argc, char** argv) {
   const float loc_thr = (float)atof(arg_of(argc, argv, "--loc-thr", "8").c_str());
   const float peak_thr = (float)atof(arg_of(argc, argv, "--peak-thr", "0").c_str());
   const bool sweep = has_flag(argc, argv, "--sweep");
+  // Score the label maps instead of a model: the ceiling any model at this output stride can
+  // reach. The gap to a trained model is what training can still win; the gap to 1.0 is what
+  // the stride costs (RESUME: 0.737 at 1/8, 0.933 at 1/4, 0.981 at 1/2, all at 8 px).
+  const bool labels_only = has_flag(argc, argv, "--labels");
   den::Cfg cfg;
   cfg.down = std::atoi(arg_of(argc, argv, "--down", "8").c_str());
   cfg.sigma = (float)atof(arg_of(argc, argv, "--sigma", "15").c_str());
@@ -425,13 +429,39 @@ static int cmd_eval(int argc, char** argv) {
   }
   std::vector<csrt::Item> items = csrt::read_split(data, split, cfg, false);
   if (items.empty()) { printf("no %s images under %s\n", split.c_str(), data.c_str()); return 1; }
-  onx::Graph g = onx::load_onnx(model);
+  // --labels scores the target maps, so there is no model to read (and asking for one that does
+  // not exist would fail before printing anything).
+  onx::Graph g;
+  if (!labels_only) g = onx::load_onnx(model);
   onx::Trainable t = onx::make_trainable(g);      // only to reuse the eval helpers; nothing is trained
   const size_t n = limit > 0 ? std::min((size_t)limit, items.size()) : items.size();
-  printf("%s on %zu %s images of %s\n", model.c_str(), n, split.c_str(), data.c_str());
+  if (labels_only)
+    printf("labels (down %d) on %zu %s images of %s\n", cfg.down, n, split.c_str(),
+           data.c_str());
+  else
+    printf("%s on %zu %s images of %s\n", model.c_str(), n, split.c_str(), data.c_str());
   if (!cfg.fidt) {
     csrt::Eval e = csrt::evaluate(t, items, cfg, limit);
     printf("count: MAE %.2f  RMSE %.2f  (%d images)\n", e.mae, e.rmse, e.n);
+    return 0;
+  }
+  if (labels_only) {
+    // the ceiling: score the label maps themselves, with the same LMDS rule
+    int tp = 0, fp = 0, fn = 0;
+    for (size_t i = 0; i < n; ++i) {
+      std::vector<std::pair<float, float>> pk =
+          peak_thr > 0.f ? den::peaks(items[i].target, peak_thr, 1) : den::lmds(items[i].target, 1);
+      for (std::pair<float, float>& q : pk) { q.first *= (float)cfg.down; q.second *= (float)cfg.down; }
+      const den::Loc r = den::match_points(pk, items[i].pts, loc_thr);
+      tp += r.tp; fp += r.fp; fn += r.fn;
+    }
+    const double prec = (tp + fp) ? (double)tp / (tp + fp) : 0.0;
+    const double rec = (tp + fn) ? (double)tp / (tp + fn) : 0.0;
+    double mx = 0;
+    for (size_t i = 0; i < n; ++i) mx += items[i].target.max() / (double)n;
+    printf("localisation LMDS (100/255 x map max): F1 %.4f  precision %.4f  recall %.4f  "
+           "map max %.3f  (%zu images)\n",
+           (prec + rec) > 0 ? 2 * prec * rec / (prec + rec) : 0.0, prec, rec, mx, n);
     return 0;
   }
   {
@@ -455,6 +485,17 @@ static int cmd_eval(int argc, char** argv) {
   size_t taken = 0;
   for (size_t i = 0; i < n; ++i) {
     const csrt::Item& it = items[i];
+    if (labels_only) {
+      maps.push_back(it.target);
+      for (const std::pair<float, float>& q : it.pts) {
+        const int ix = (int)(q.first) / cfg.down, iy = (int)(q.second) / cfg.down;
+        if (ix < 0 || iy < 0 || ix >= it.target.w || iy >= it.target.h) continue;
+        lsum += it.target.v[(size_t)iy * it.target.w + ix];
+        psum += it.target.v[(size_t)iy * it.target.w + ix];
+        ++taken;
+      }
+      continue;
+    }
     const int w = it.w - it.w % cfg.down, h = it.h - it.h % cfg.down;
     Tensor x = make_tensor({1, 3, h, w}, false);
     const float mean[3] = {0.485f, 0.456f, 0.406f}, sd[3] = {0.229f, 0.224f, 0.225f};
