@@ -15,18 +15,34 @@ every = int(sys.argv[2]) if len(sys.argv) > 2 else 60
 
 
 def get(url):
-    return json.load(urllib.request.urlopen(url, timeout=60))
+    return json.load(urllib.request.urlopen(url, timeout=120))
 
 
-for _ in range(120):
-    jobs = get("http://127.0.0.1:8787/job").get("jobs", [])
+def get_retry(url, tries=5):
+    """Kaggle's proxy returns a transient 502 every few minutes, and a busy box makes /job take
+    ~15 s. Dying on either one loses sight of a job that is still running — which is how a live
+    session got mistaken for a dead one (RESUME, 2026-08-21). So retry instead of raising."""
+    for i in range(tries):
+        try:
+            return get(url)
+        except Exception as e:                              # noqa: BLE001 - any transport failure
+            print("  poll failed (%s), retrying" % e, flush=True)
+            time.sleep(5 * (i + 1))
+    return {}
+
+
+for _ in range(240):
+    jobs = get_retry("http://127.0.0.1:8787/job").get("jobs", [])
+    if not jobs:
+        time.sleep(every)
+        continue
     j = next((x for x in jobs if x.get("id") == jid), None)
     if j is None:
         print("no such job: %s" % jid)
         sys.exit(2)
     if j.get("state") != "running":
         print("%s -> %s (exit %s)" % (jid, j.get("state"), j.get("exit_code")))
-        log = get("http://127.0.0.1:8787/job/%s/log?offset=0" % jid).get("data", "")
+        log = get_retry("http://127.0.0.1:8787/job/%s/log?offset=0" % jid).get("data", "")
         print("\n".join(log.splitlines()[-25:]))
         sys.exit(0)
     print("%s still running (%.1f min)" % (jid, (time.time() - j.get("started", 0)) / 60), flush=True)

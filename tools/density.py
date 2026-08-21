@@ -126,6 +126,26 @@ def fidt(pts, w, h, down=8, alpha=0.02, beta=0.75):
     return (1.0 / (np.power(D, e) + 1.0)).astype(np.float32)
 
 
+LMDS_REL = 100.0 / 255.0        # dk-liang/FIDTM test.py: threshold = 100/255 * the map's own maximum
+LMDS_FLOOR = 0.1                # ... and nothing at all if that maximum is under 0.1
+
+
+def lmds(m, radius=1, rel=LMDS_REL, floor=LMDS_FLOOR):
+    """FIDTM's Local-Maxima-Detection-Strategy, as the reference implementation does it.
+
+    The threshold is **relative to the map's own maximum**, not absolute — that is the part worth
+    copying rather than inventing. Measured here 2026-08-21: a model whose map only reaches 0.47
+    scores F1 0.005 at an absolute 0.5 and F1 0.72 under this rule, on the same weights. The
+    `floor` is their negative-sample guard: a map that never gets above 0.1 predicts nothing.
+    """
+    mx = float(m.max()) if m.size else 0.0
+    if mx < floor:
+        return []
+    # float32 on purpose: the C++ side computes `rel * mx` in float, and a peak sitting within a
+    # float of the threshold would otherwise be kept by one implementation and dropped by the other.
+    return peaks(m, float(np.float32(rel) * np.float32(mx)), radius)
+
+
 def peaks(m, thr=0.5, radius=1):
     """Local maxima above a threshold, ties broken by scan order — the same rule as pure/density.hpp."""
     h, w = m.shape

@@ -123,6 +123,9 @@ static int cmd_train(int argc, char** argv) {
   const float momentum = (float)atof(arg_of(argc, argv, "--momentum", "0.95").c_str());
   const float wd = (float)atof(arg_of(argc, argv, "--weight-decay", "5e-4").c_str());
   const float count_w = (float)atof(arg_of(argc, argv, "--count-weight", "0").c_str());
+  // Adam with weight decay is what dk-liang/FIDTM uses (lr 1e-4, wd 5e-4). Default 0 rather
+  // than --weight-decay so the runs already recorded in RESUME stay reproducible.
+  const float adam_wd = (float)atof(arg_of(argc, argv, "--adam-wd", "0").c_str());
   const int eval_every = std::atoi(arg_of(argc, argv, "--eval-every", "0").c_str());
   const int eval_limit = std::atoi(arg_of(argc, argv, "--eval-limit", "0").c_str());
   const uint64_t seed = strtoull(arg_of(argc, argv, "--seed", "1234").c_str(), nullptr, 10);
@@ -140,10 +143,12 @@ static int cmd_train(int argc, char** argv) {
   cfg.adaptive = has_flag(argc, argv, "--adaptive");
   cfg.fidt = has_flag(argc, argv, "--fidt");
   const float loc_thr = (float)atof(arg_of(argc, argv, "--loc-thr", "8").c_str());
-  // FIDTM's default is 0.5, but a map that has not grown to 1.0 yet is limited by the
-  // threshold rather than by where its peaks are (measured: map max 0.446 at step 2000 gave
-  // recall 0.001 at precision 1.000), so it is a flag on both sides.
-  const float peak_thr = (float)atof(arg_of(argc, argv, "--peak-thr", "0.5").c_str());
+  // 0 (the default) means the reference implementation's LMDS: keep local maxima above
+  // 100/255 of *this map's own maximum*, nothing at all if that maximum is under 0.1
+  // (dk-liang/FIDTM, test.py). A positive value forces an absolute threshold instead, which is
+  // only useful as a diagnostic: measured 2026-08-21, the same weights score F1 0.005 at an
+  // absolute 0.5 and F1 0.72 under the relative rule, because the map tops out near 0.47.
+  const float peak_thr = (float)atof(arg_of(argc, argv, "--peak-thr", "0").c_str());
   if (data.empty()) {
     printf("usage: crowd train --data <ShanghaiTech/part_B> [--init onnx] [--steps N] [--batch N]\n"
            "                   [--crop 0] [--lr 1e-5] [--lr-final 1] [--optim sgd] [--adaptive | --fidt]\n"
@@ -172,7 +177,7 @@ static int cmd_train(int argc, char** argv) {
   // moves the map's DC level around, and the count is what that hurts.
   const bool use_sgd = optim == "sgd";
   SGD sgd(t.params, lr, momentum, wd, false);
-  Adam adam(t.params, lr, 0.9f, 0.999f, 1e-8f, 0.f, false);
+  Adam adam(t.params, lr, 0.9f, 0.999f, 1e-8f, adam_wd, false);
   Rng rng(seed);
   double run = -1;
   double best = 1e9;
@@ -405,7 +410,7 @@ static int cmd_eval(int argc, char** argv) {
   const std::string split = arg_of(argc, argv, "--split", "test");
   const int limit = std::atoi(arg_of(argc, argv, "--limit", "0").c_str());
   const float loc_thr = (float)atof(arg_of(argc, argv, "--loc-thr", "8").c_str());
-  const float peak_thr = (float)atof(arg_of(argc, argv, "--peak-thr", "0.5").c_str());
+  const float peak_thr = (float)atof(arg_of(argc, argv, "--peak-thr", "0").c_str());
   const bool sweep = has_flag(argc, argv, "--sweep");
   den::Cfg cfg;
   cfg.down = std::atoi(arg_of(argc, argv, "--down", "8").c_str());
@@ -429,12 +434,18 @@ static int cmd_eval(int argc, char** argv) {
     printf("count: MAE %.2f  RMSE %.2f  (%d images)\n", e.mae, e.rmse, e.n);
     return 0;
   }
-  if (!sweep) {
+  {
+    // The headline number always uses the rule the reference uses (LMDS, threshold relative to
+    // each map's own maximum) unless an absolute --peak-thr was asked for.
     csrt::LocEval e = csrt::evaluate_loc(t, items, cfg.down, loc_thr, peak_thr, limit);
-    printf("localisation @%.2f: F1 %.4f  precision %.4f  recall %.4f  map max %.3f  (%d images)\n",
-           peak_thr, e.f1, e.precision, e.recall, e.pmax, e.n);
-    return 0;
+    if (peak_thr > 0.f)
+      printf("localisation @%.2f absolute: F1 %.4f  precision %.4f  recall %.4f  map max %.3f  (%d images)\n",
+             peak_thr, e.f1, e.precision, e.recall, e.pmax, e.n);
+    else
+      printf("localisation LMDS (100/255 x map max): F1 %.4f  precision %.4f  recall %.4f  map max %.3f  (%d images)\n",
+             e.f1, e.precision, e.recall, e.pmax, e.n);
   }
+  if (!sweep) return 0;
   // One forward pass per image, then every threshold scored off the stored maps. Scoring each
   // threshold with its own pass would have run the network seven times for one table, and 60 whole
   // images through the CPU runtime is minutes rather than seconds.
@@ -471,6 +482,7 @@ static int cmd_eval(int argc, char** argv) {
     maps.push_back(std::move(m));
     free_graph(p);
   }
+  printf("  absolute thresholds, for diagnosis only:\n");
   printf("  peak_thr | precision | recall |    F1\n");
   for (float thr : kSweep) {
     int tp = 0, fp = 0, fn = 0;

@@ -76,7 +76,9 @@ def main():
     ap.add_argument("--adaptive", action="store_true")
     ap.add_argument("--fidt", action="store_true")
     ap.add_argument("--loc-thr", dest="loc_thr", type=float, default=8.0)
-    ap.add_argument("--peak-thr", dest="peak_thr", type=float, default=0.5)
+    ap.add_argument("--peak-thr", dest="peak_thr", type=float, default=0.0,
+                    help="0 = the reference's LMDS (100/255 of each map's own maximum); "
+                         "a positive value forces an absolute threshold")
     ap.add_argument("--sweep", action="store_true")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
@@ -102,9 +104,11 @@ def main():
         return 0
 
     def score(thr):
+        """`thr <= 0` scores with the reference's LMDS (relative to each map's own maximum)."""
         tp = fp = fn = 0
         for p, (_f, _x, pts, _l, _w, _h) in zip(preds, items):
-            pk = [(px * a.down, py * a.down) for px, py in D.peaks(p, thr, 1)]
+            found = D.peaks(p, thr, 1) if thr > 0 else D.lmds(p, 1)
+            pk = [(px * a.down, py * a.down) for px, py in found]
             r = D.match_points(pk, [tuple(q) for q in pts], a.loc_thr)
             tp += r["tp"]
             fp += r["fp"]
@@ -113,12 +117,20 @@ def main():
         rec = tp / (tp + fn) if tp + fn else 0.0
         return prec, rec, (2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0)
 
+    # The headline number always uses the rule the reference uses, unless an absolute threshold
+    # was asked for.
+    prec, rec, f1 = score(a.peak_thr)
+    mx = float(np.mean([p.max() for p in preds]))
+    if a.peak_thr > 0:
+        print("localisation @%.2f absolute: F1 %.4f  precision %.4f  recall %.4f  map max %.3f  "
+              "(%d images)" % (a.peak_thr, f1, prec, rec, mx, len(items)))
+    else:
+        print("localisation LMDS (100/255 x map max): F1 %.4f  precision %.4f  recall %.4f  "
+              "map max %.3f  (%d images)" % (f1, prec, rec, mx, len(items)))
     if not a.sweep:
-        prec, rec, f1 = score(a.peak_thr)
-        print("localisation @%.2f: F1 %.4f  precision %.4f  recall %.4f  map max %.3f  (%d images)"
-              % (a.peak_thr, f1, prec, rec, float(np.mean([p.max() for p in preds])), len(items)))
         return 0
 
+    print("  absolute thresholds, for diagnosis only:")
     print("  peak_thr | precision | recall |    F1")
     for thr in SWEEP:
         prec, rec, f1 = score(thr)

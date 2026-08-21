@@ -209,7 +209,7 @@ inline Eval evaluate(onx::Trainable& t, const std::vector<Item>& items, const de
 struct LocEval { double precision = 0, recall = 0, f1 = 0, pmax = 0; int tp = 0, fp = 0, fn = 0, n = 0; };
 
 inline LocEval evaluate_loc(onx::Trainable& t, const std::vector<Item>& items, int out_down,
-                            float thr = 8.f, float peak_thr = 0.5f, int limit = 0) {
+                            float thr = 8.f, float peak_thr = 0.f, int limit = 0) {
   LocEval e;
   const size_t n = limit > 0 ? std::min((size_t)limit, items.size()) : items.size();
   for (size_t i = 0; i < n; ++i) {
@@ -232,7 +232,10 @@ inline LocEval evaluate_loc(onx::Trainable& t, const std::vector<Item>& items, i
     // reported with F1: FIDT targets peak at 1.0, so F1 0 with a map that tops out at 0.03 means
     // "nothing reaches the 0.5 peak threshold yet", not "the peaks are in the wrong places"
     e.pmax += m.max() / (double)n;
-    std::vector<std::pair<float, float>> pk = den::peaks(m, peak_thr, 1);
+    // peak_thr <= 0 means the reference's rule: a threshold relative to this map's own maximum.
+    // A fixed absolute threshold measures the map's amplitude as much as its structure.
+    std::vector<std::pair<float, float>> pk =
+        peak_thr > 0.f ? den::peaks(m, peak_thr, 1) : den::lmds(m, 1);
     const float scale = (float)w / (float)std::max(1, m.w);     // map pixels -> image pixels
     for (auto& q : pk) { q.first *= scale; q.second *= scale; }
     const den::Loc r = den::match_points(pk, it.pts, thr);

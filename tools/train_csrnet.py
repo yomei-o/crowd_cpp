@@ -140,7 +140,7 @@ def evaluate(model, ds, device, limit=0):
 
 
 @torch.no_grad()
-def evaluate_loc(model, ds, device, down, thr=8.0, peak_thr=0.5, limit=0):
+def evaluate_loc(model, ds, device, down, thr=8.0, peak_thr=0.0, limit=0):
     """Localisation: peaks of the predicted FIDT map against the annotated points, as precision /
     recall / F1 at a distance threshold in *image* pixels. This is the number FIDTM exists for; a
     density model's count MAE says nothing about whether the positions are right."""
@@ -155,7 +155,10 @@ def evaluate_loc(model, ds, device, down, thr=8.0, peak_thr=0.5, limit=0):
         # 0.0000 means something different when the map tops out at 0.03 (nothing is above the 0.5
         # peak threshold yet) than when it tops out at 0.9 (peaks exist but land in the wrong places)
         pmax.append(float(m.max()))
-        pk = [(px * down, py * down) for px, py in D.peaks(m, peak_thr, 1)]
+        # peak_thr <= 0 means the reference's rule: a threshold relative to this map's own maximum
+        # (D.lmds). A fixed absolute threshold measures amplitude as much as structure.
+        pk = [(px * down, py * down) for px, py
+              in (D.peaks(m, peak_thr, 1) if peak_thr > 0 else D.lmds(m, 1))]
         r = D.match_points(pk, [tuple(p) for p in ds.pts[i]], thr)
         tp += r["tp"]
         fp += r["fp"]
@@ -185,6 +188,10 @@ def main():
                     help="cosine-decay the lr to lr*this by the last step (1.0 = constant, which is "
                          "what the reference implementation does)")
     ap.add_argument("--log", default="", help="write step,loss,lr and every eval to a CSV")
+    ap.add_argument("--adam-wd", dest="adam_wd", type=float, default=0.0,
+                    help="weight decay for Adam (SGD uses --weight-decay). dk-liang/FIDTM trains "
+                         "with Adam lr 1e-4 and weight decay 5e-4; default 0 keeps the runs already "
+                         "recorded in RESUME reproducible")
     ap.add_argument("--weight-decay", dest="wd", type=float, default=5e-4,
                     help="the reference implementation's value (leeyeehoo/CSRNet-pytorch)")
     ap.add_argument("--count-weight", dest="count_weight", type=float, default=0.0,
@@ -198,11 +205,13 @@ def main():
                          "study measured F1 ceilings of 0.737 at 1/8, 0.933 at 1/4 and 0.981 at 1/2.")
     ap.add_argument("--down", type=int, default=8, help="the graph's output stride (decoder 2 -> 4, 4 -> 2)")
     ap.add_argument("--loc-thr", dest="loc_thr", type=float, default=8.0)
-    ap.add_argument("--peak-thr", dest="peak_thr", type=float, default=0.5,
-                    help="a local maximum counts as a detection above this. FIDTM's default "
-                         "is 0.5, but a map that has not grown to 1.0 yet is limited by it "
-                         "rather than by where its peaks are: at step 2000 the map topped out "
-                         "at 0.446 and recall was 0.001 with precision 1.000")
+    ap.add_argument("--peak-thr", dest="peak_thr", type=float, default=0.0,
+                    help="0 (the default) uses the reference implementation's LMDS: local maxima "
+                         "above 100/255 of *this map's own maximum*, nothing at all if that maximum "
+                         "is under 0.1 (dk-liang/FIDTM, test.py). A positive value forces an "
+                         "absolute threshold, which is a diagnostic only: the same weights scored "
+                         "F1 0.005 at an absolute 0.5 and F1 0.72 relative, because the map tops "
+                         "out near 0.47")
     ap.add_argument("--adaptive", action="store_true", help="Part A's adaptive sigma (default: fixed 15)")
     ap.add_argument("--sigma", type=float, default=15.0)
     ap.add_argument("--eval-every", dest="eval_every", type=int, default=250)
@@ -253,8 +262,12 @@ def main():
     # all of which match what is here — for 400 epochs over a list repeated 4x, i.e. ~480,000 steps.
     # Its `adjust_learning_rate` has scales [1,1,1,1], so there is no decay to copy. The only real
     # differences from this file were the optimiser and the budget.
+    # --adam-wd defaults to 0 rather than to --weight-decay, so the runs recorded in RESUME stay
+    # reproducible; FIDTM's reference implementation uses Adam *with* weight decay 5e-4, so that
+    # configuration is reachable by asking for it.
     opt = (torch.optim.SGD(model.parameters(), lr=a.lr, momentum=a.momentum, weight_decay=a.wd)
-           if a.optim == "sgd" else torch.optim.Adam(model.parameters(), lr=a.lr))
+           if a.optim == "sgd"
+           else torch.optim.Adam(model.parameters(), lr=a.lr, weight_decay=a.adam_wd))
     rng = np.random.default_rng(a.seed)
 
     # --- resume ---------------------------------------------------------------------------------

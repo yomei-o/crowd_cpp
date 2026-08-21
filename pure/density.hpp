@@ -180,6 +180,20 @@ inline std::vector<std::pair<float, float>> peaks(const Map& m, float thr, int r
   return out;
 }
 
+// FIDTM's Local-Maxima-Detection-Strategy, as the reference implementation does it
+// (dk-liang/FIDTM, test.py): 3x3 local maxima, kept only above `rel` times **the map's own
+// maximum**, and nothing at all when that maximum is below `floor` (their negative-sample guard).
+//
+// The threshold being relative rather than absolute is the part worth copying rather than inventing.
+// Measured 2026-08-21 on the same weights: a model whose map only reaches 0.47 scores F1 0.005 under
+// an absolute 0.5 and F1 0.72 under this rule. tools/density.py has the same function.
+inline std::vector<std::pair<float, float>> lmds(const Map& m, int radius = 1,
+                                                 float rel = 100.f / 255.f, float floor = 0.1f) {
+  const float mx = m.max();
+  if (mx < floor) return {};
+  return peaks(m, rel * mx, radius);
+}
+
 // ---------------------------------------------------------------- localisation metric
 
 // Precision / recall / F1 of predicted points against annotated ones, with a distance threshold —
