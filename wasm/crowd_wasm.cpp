@@ -37,8 +37,12 @@ EMSCRIPTEN_KEEPALIVE int cw_run(const unsigned char* rgba, int w, int h, int dow
                                float floor_) {
   if (!g_ok) { g_result = "{\"error\":\"model not loaded\"}"; return -1; }
   if (w <= 0 || h <= 0) { g_result = "{\"error\":\"empty frame\"}"; return -1; }
-  const int cw = w - w % down, ch = h - h % down;      // the graph needs a multiple of the stride
-  if (cw <= 0 || ch <= 0) { g_result = "{\"error\":\"frame smaller than the stride\"}"; return -1; }
+  // Crop to a multiple of 8, not of `down`: the front end has three 2x pools, so a height of 340
+  // becomes 42 (not 42.5) and the decoder brings it back to 168 rather than 170. Measured — with a
+  // 512x340 frame the map came out 256x168 and every point drifted up to 4 px towards the bottom.
+  const int ALIGN = 8;
+  const int cw = w - w % ALIGN, ch = h - h % ALIGN;
+  if (cw <= 0 || ch <= 0) { g_result = "{\"error\":\"frame smaller than 8 px\"}"; return -1; }
 
   const float mean[3] = {0.485f, 0.456f, 0.406f}, sd[3] = {0.229f, 0.224f, 0.225f};
   Tensor x = make_tensor({1, 3, ch, cw}, false);
@@ -68,9 +72,12 @@ EMSCRIPTEN_KEEPALIVE int cw_run(const unsigned char* rgba, int w, int h, int dow
                    ",\"map_h\":" + std::to_string(g_map.h) +
                    ",\"map_max\":" + std::to_string(g_map.max()) +
                    ",\"points\":[";
+  // map coordinates -> input pixels, from the shapes we actually got rather than from `down`, so a
+  // graph with a different stride (or a crop that did not divide evenly) still lands the points right
+  const float sx = g_map.w ? (float)cw / (float)g_map.w : (float)down;
+  const float sy = g_map.h ? (float)ch / (float)g_map.h : (float)down;
   for (size_t i = 0; i < pk.size(); ++i) {
-    // map coordinates -> input pixels
-    const float px = pk[i].first * (float)down, py = pk[i].second * (float)down;
+    const float px = pk[i].first * sx, py = pk[i].second * sy;
     js += (i ? ",[" : "[") + std::to_string(px) + "," + std::to_string(py) + "]";
   }
   js += "]}";

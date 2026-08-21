@@ -142,6 +142,17 @@ ShanghaiTech Part B で学習したもの（**test 316 枚で F1 0.7971 / 8px**�
 VGG-16 の事前学習重みは torchvision（BSD-3-Clause）由来で、リポジトリには**含めない**
 （各自 `--from-pt` で渡す）。データセットも同様に含めない。
 
-`models/*.onnx` も git に入れない: CSRNet は 16.3M パラメータ ＝ 1 個 **62MB** あり、
+`models/*.onnx` は原則 git に入れない: CSRNet は 16.3M パラメータ ＝ 1 個 **62MB** あり、
 ランダム初期化のものは `crowd init-csrnet` の 1 コマンドで作り直せる。
-学習済みのもの（特に軽量版）は、デモに必要になった時点で例外として入れる。
+例外は学習済みでそのまま使えるもの 1 本だけ（`models/fidt_partB.onnx`、詳細は
+[models/README.md](models/README.md)）。
+
+デモのサンプル写真（`wasm/samples/`）は Wikimedia Commons から。**ShanghaiTech の画像は入れていない。**
+
+| ファイル | ライセンス | 作者 |
+|---|---|---|
+| `wasm/samples/shibuya-crossing.jpg` | Public domain | Picturetokyo（English Wikipedia） |
+| `wasm/samples/shibuya-scramble.jpg` | CC BY 2.0 | relux. |
+| `wasm/samples/shibuya-street.jpg` | CC BY 2.0 | Dick Thomas Johnson |
+
+出典 URL と、縮小・EXIF 除去の経緯は [wasm/samples/README.md](wasm/samples/README.md)。
